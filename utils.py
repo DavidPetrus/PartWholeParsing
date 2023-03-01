@@ -9,13 +9,13 @@ import pickle as pkl
 import os
 import json
 from PIL import Image
-from sklearn.cluster import AgglomerativeClustering
 
 from absl import flags
 
 FLAGS = flags.FLAGS
 
 #color = np.random.randint(0,256,[5120,3],dtype=np.uint8)
+
 
 def random_crop(image):
     img_w, img_h = image.size
@@ -70,7 +70,7 @@ def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
 def find_clusters(log_dict, level_embds):
     start = time.time()
     for dist_thresh in [0.1,0.2,0.3,0.5]:
-        agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,affinity='cosine',linkage='average')
+        agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=dist_thresh,linkage='average')
         #for l_ix, embd_tensor in enumerate(level_embds):
         l_ix = 0
         embd_tensor = level_embds
@@ -88,7 +88,7 @@ def plot_embeddings(level_embds):
 
     resize = [8,8,8,8,16]
     segs = []
-    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh,affinity='cosine',linkage='average')
+    agglom_clust = AgglomerativeClustering(n_clusters=None,distance_threshold=FLAGS.dist_thresh,linkage='average')
     for l_ix, embd_tensor in enumerate(level_embds):
         embds = embd_tensor.detach().movedim(1,3).cpu().numpy()
         _,l_h,l_w,_ = embds.shape
