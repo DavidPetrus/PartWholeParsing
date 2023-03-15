@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import clip
-from sklearn.cluster import AgglomerativeClustering
+from einops import rearrange
+
+import dino.vision_transformer as vits
 from utils import find_clusters
 
 from absl import flags
@@ -11,104 +12,207 @@ FLAGS = flags.FLAGS
 
 class ImageParser(nn.Module):
 
-    def __init__(self, clip_model, objectnames):
+    def __init__(self, arch):
         super(ImageParser, self).__init__()
 
-        self.clip_model = clip_model
-        '''proj_layers = []
-        for l in range(FLAGS.proj_depth-1):
-            proj_layers.append(nn.Conv2d(640, 640, kernel_size=1))
-            proj_layers.append(nn.ReLU())
-        proj_layers.append(nn.Conv2d(640, FLAGS.proj_dim, kernel_size=1))
-        self.proj_wholes = nn.Sequential(*proj_layers)'''
+        self.model = vits.__dict__[arch](
+            patch_size=8,
+            num_classes=0)
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.model.eval().cuda()
+        self.dropout = nn.Dropout2d(p=.1)
 
+        if arch == "vit_small":
+            url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
+        elif arch == "vit_base":
+            url = "dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+
+        state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
+        self.model.load_state_dict(state_dict, strict=True)
+
+        self.prototypes = torch.randn((FLAGS.num_prototypes, FLAGS.output_dim)).to('cuda')
+
+        proj_layers = []
+        for l in range(FLAGS.depth):
+            proj_layers.append(AttnBlock(
+                    dim=FLAGS.embd_dim,
+                    num_heads=6,
+                    mlp_ratio=2,
+                    drop=0,
+                    attn_drop=0,
+                    drop_path=0))
+
+        proj_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.output_dim))
+
+        self.proj_layers = nn.Sequential(*proj_layers).to('cuda')
+
+        self.class_pred = nn.Linear(FLAGS.num_prototypes, 27).to('cuda')
+
+    def forward(self, x):
+        self.model.eval()
         with torch.no_grad():
-            self.get_text_embeddings(objectnames)
-        self.fm_dim = 24
+            # get dino activations
+            dino_feat= self.model.get_intermediate_layers(x, n=1)
 
-    def get_text_embeddings(self, objectnames):
-        prototypes = []
-        for category in objectnames:
-            text = clip.tokenize([f"a {category}"]).to('cuda')
-            prototypes.append(self.clip_model.encode_text(text))
+        feat = self.proj_layers(dino_feat[0])
 
-        self.prototypes = nn.Parameter(torch.cat(prototypes,dim=0), requires_grad=True).to('cuda')
+        return feat
 
-    def get_feature_maps(self, x):
-        with torch.set_grad_enabled(FLAGS.train_clip):
-            if FLAGS.clip_model == 'vit':
-                x = self.clip_model.visual.conv1(x)  # shape = [*, width, grid, grid]
-                x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-                x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-                x = torch.cat([self.clip_model.visual.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  
-                # shape = [*, grid ** 2 + 1, width]
-                x = x + self.clip_model.visual.positional_embedding.to(x.dtype)
-                x = self.clip_model.visual.ln_pre(x)
+    def match_crops(self, sims_a, sims_b, crop_dims):
+        b,fm_size,_,c = sims_a.shape
+        if crop_dims[1][2] > crop_dims[0][2]:
+            l_map = sims_b
+            s_map = sims_a
+            l_dims = crop_dims[1]
+            s_dims = crop_dims[0]
+        else:
+            l_map = sims_a
+            s_map = sims_b
+            l_dims = crop_dims[0]
+            s_dims = crop_dims[1]
 
-                x = x.permute(1, 0, 2)  # NLD -> LND
-                x = self.clip_model.visual.transformer(x)
-                x = x.permute(1, 0, 2)  # LND -> NLD
-                
-                feature_map = x.clone()
+        ratio = l_dims[2]/s_dims[2]
 
-                #x = self.clip_model.visual.ln_post(x[:, 0, :])
-                x = self.clip_model.visual.ln_post(x)
+        fm_scale_l = fm_size/l_dims[2]
+        fm_scale_s = fm_size/s_dims[2]
 
-                x = x @ self.clip_model.visual.proj
+        overlap_dims = (max(s_dims[0], l_dims[0]), \
+                        max(s_dims[1], l_dims[1]), \
+                        min(s_dims[0]+s_dims[2], l_dims[0]+l_dims[2]), \
+                        min(s_dims[1]+s_dims[2], l_dims[1]+l_dims[2]))
 
-                return x[:, 1:].reshape(FLAGS.batch_size, 24, 24, 768).detach()
-            else:
-                def stem(x):
-                    x = self.clip_model.visual.relu1(self.clip_model.visual.bn1(self.clip_model.visual.conv1(x)))
-                    x = self.clip_model.visual.relu2(self.clip_model.visual.bn2(self.clip_model.visual.conv2(x)))
-                    x = self.clip_model.visual.relu3(self.clip_model.visual.bn3(self.clip_model.visual.conv3(x)))
-                    x = self.clip_model.visual.avgpool(x)
-                    return x
+        fm_l_crop = l_map[:, \
+                    round((overlap_dims[1] - l_dims[1]) * fm_scale_l): \
+                    round((overlap_dims[3] - l_dims[1]) * fm_scale_l), \
+                    round((overlap_dims[0] - l_dims[0]) * fm_scale_l): \
+                    round((overlap_dims[2] - l_dims[0]) * fm_scale_l)] # B,fm_a_h,fm_a_w,c
 
-                x = x.type(self.clip_model.visual.conv1.weight.dtype)
-                x = stem(x)
-                x = self.clip_model.visual.layer1(x)
-                x = self.clip_model.visual.layer2(x)
-                #x = self.visual.layer3(x)
-                #x = self.visual.layer4(x)
-                #x = self.visual.attnpool(x)
+        fm_s_crop = s_map[:, \
+                    round((overlap_dims[1] - s_dims[1]) * fm_scale_s): \
+                    round((overlap_dims[3] - s_dims[1]) * fm_scale_s), \
+                    round((overlap_dims[0] - s_dims[0]) * fm_scale_s): \
+                    round((overlap_dims[2] - s_dims[0]) * fm_scale_s)] # B,fm_b_h,fm_b_w,c
+        
+        fm_s_crop = F.interpolate(fm_s_crop.movedim(3,1), size=(fm_l_crop.shape[1], fm_l_crop.shape[2]), mode='bilinear', align_corners=False).movedim(1,3)
 
-        if not FLAGS.train_clip:
-            x = x.detach()
-
-        return self.proj_wholes(x.float()).movedim(1,3)
-
-    def compute_sim_loss(self, x, class_map):
-        norm_protos = F.normalize(self.prototypes, dim=1)
-        sims = F.normalize(x, dim=3)[:,:,:,None] @ norm_protos[class_map-1][:,:,:,:,None] # BS, self.fm_dim, self.fm_dim
-
-        return 1-sims.mean()
-
-    def get_acc(self, x, class_map):
-        sims = (F.normalize(x, dim=3) @ F.normalize(self.prototypes, dim=1).T) # BS, self.fm_dim, self.fm_dim, num_prototypes
-
-        acc = (torch.argmax(sims, dim=3) == class_map-1).float().mean()
-
-        return acc
+        return fm_l_crop, fm_s_crop
 
 
-    def vic_reg(self, x):
-        std_x = torch.sqrt(x.var(dim=1) + 0.0001)
-        std_loss = torch.mean(F.relu(1 - std_x))
+class Mlp(nn.Module):
 
-        x = x.reshape(FLAGS.batch_size*self.fm_dim*self.fm_dim, FLAGS.proj_dim)
-        x = x - x.mean(dim=0, keepdim=True)
-        cov_x = torch.matmul(x.movedim(0,1),x) / (x.shape[0] - 1)
-        cov_loss = (self.off_diagonal(cov_x)).pow_(2).sum().div(x.shape[0]*x.shape[1])
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
 
-        return std_loss, cov_loss, std_x.mean()
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+class Attention(nn.Module):
+
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 attn_drop=0.,
+                 proj_drop=0.,
+                 qkv_fuse=False):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim**-0.5
+        self.qkv_fuse = qkv_fuse
+
+        if qkv_fuse:
+            self.qkv = nn.Linear(dim, dim * 3)
+        else:
+            self.q_proj = nn.Linear(dim, dim)
+            self.k_proj = nn.Linear(dim, dim)
+            self.v_proj = nn.Linear(dim, dim)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def extra_repr(self):
+        return f'num_heads={self.num_heads}, \n' \
+               f'qkv_fuse={self.qkv_fuse}'
+
+    def forward(self, query, key=None, *, value=None, mask=None):
+        if self.qkv_fuse:
+            assert key is None
+            assert value is None
+            x = query
+            B, N, C = x.shape
+            S = N
+            # [3, B, nh, N, C//nh]
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            # [B, nh, N, C//nh]
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        else:
+            B, N, C = query.shape
+            if key is None:
+                key = query
+            if value is None:
+                value = key
+            S = key.size(1)
+            # [B, nh, N, C//nh]
+            q = rearrange(self.q_proj(query), 'b n (h c)-> b h n c', h=self.num_heads, b=B, n=N, c=C // self.num_heads)
+            # [B, nh, S, C//nh]
+            k = rearrange(self.k_proj(key), 'b n (h c)-> b h n c', h=self.num_heads, b=B, c=C // self.num_heads)
+            # [B, nh, S, C//nh]
+            v = rearrange(self.v_proj(value), 'b n (h c)-> b h n c', h=self.num_heads, b=B, c=C // self.num_heads)
+
+        # [B, nh, N, S]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        if mask is not None:
+            attn = attn + mask.unsqueeze(dim=1)
+            attn = attn.softmax(dim=-1)
+        else:
+            attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        assert attn.shape == (B, self.num_heads, N, S)
+
+        # [B, nh, N, C//nh] -> [B, N, C]
+        # out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        out = rearrange(attn @ v, 'b h n c -> b n (h c)', h=self.num_heads, b=B, n=N, c=C // self.num_heads)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out
 
 
-    def off_diagonal(self, x):
-        n, m = x.shape
-        assert n == m
-        return x.reshape(-1)[:-1].reshape(n - 1, n + 1)[:,1:].reshape(-1)
+class AttnBlock(nn.Module):
 
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 mlp_ratio=4.,
+                 drop=0.,
+                 attn_drop=0.,
+                 drop_path=0.,
+                 act_layer=nn.GELU):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = Attention(
+            dim,
+            num_heads=num_heads,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            qkv_fuse=True)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-
-
+    def forward(self, x, mask=None):
+        x = x + self.drop_path(self.attn(self.norm1(x), mask=mask))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
