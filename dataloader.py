@@ -7,7 +7,7 @@ import pickle as pkl
 import glob
 import cv2
 import random
-from torchvision.transforms import Resize, InterpolationMode, CenterCrop, Compose, ToTensor, PILToTensor, ColorJitter
+from torchvision.transforms import Resize, CenterCrop, Compose, ToTensor, PILToTensor, ColorJitter
 
 from utils import random_crop, color_distortion, loadAde20K, color_normalize, transform_image
 
@@ -66,26 +66,32 @@ class Coco(torch.utils.data.Dataset):
 
         img_batch = [[] for c in range(FLAGS.num_crops)]
         label_batch = [[] for c in range(FLAGS.num_crops)]
-        crop_size_a = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop)
-        crop_size_b = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop)
-        crop_dims = [(np.random.uniform(0.,1.-crop_size_a),np.random.uniform(0.,1.-crop_size_a),crop_size_a), \
-                   (np.random.uniform(0.,1.-crop_size_b),np.random.uniform(0.,1.-crop_size_b),crop_size_b)]
+        crop_dims = []
+        for c in range(FLAGS.num_crops):
+            crop_size = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop)
+            crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
 
         batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size)
 
         for img_file, label_file in batch_sample:
+            while True:
+                try:
+                    img = cv2.imread(img_file)
+                    label = torch.as_tensor(np.array(Image.open(label_file)), dtype=torch.int64)
+                    if img is None: 
+                        raise
+                    break
+                except:
+                    print('-----------------------', img_file)
+                    idx = np.random.randint(len(self.image_files))
+                    img_file = self.image_files[idx]
+                    label_file = self.label_files[idx]
 
-            img = cv2.imread(img_file)
-            label = torch.as_tensor(np.array(Image.open(label_file)), dtype=torch.int64)
             label[label == 255] = -1  # to be consistent with 10k
             coarse_label = torch.zeros_like(label)
             for fine, coarse in self.fine_to_coarse.items():
                 coarse_label[label == fine] = coarse
             coarse_label[label == -1] = -1
-            
-            #while img is None:
-            #    print('-----------------------', img_file)
-            #    img = cv2.imread(self.image_files[np.random.randint(len(self.image_files))])
 
             img = img[:,:,::-1]
             h,w,_ = img.shape

@@ -51,6 +51,32 @@ def random_crop(image, crop_dims=None, min_crop=0.5, inter_mode='bilinear'):
 
     return resized, [crop_x,crop_y,crop_size]
 
+def sinkhorn_knopp(sims):
+    with torch.no_grad():
+        Q = F.softmax(sims.reshape(-1) / FLAGS.epsilon, dim=0).reshape(-1, FLAGS.num_prototypes).t() # Q is K-by-B for consistency with notations from our paper
+        B = Q.shape[1] # number of samples to assign
+        K = Q.shape[0] # how many prototypes
+
+        for it in range(FLAGS.sinkhorn_iters):
+            # normalize each row: total weight per prototype must be 1/K
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            Q = Q/sum_of_rows
+            Q = Q/K
+
+            # normalize each column: total weight per sample must be 1/B
+            Q = Q/torch.sum(Q, dim=0, keepdim=True)
+            Q = Q/B
+
+        if FLAGS.round_q:
+            # Verify this is correct
+            max_proto_sim,_ = Q.max(dim=0)
+            Q[Q != max_proto_sim] = 0.
+            Q[Q == max_proto_sim] = 1.
+        else:
+            Q = Q*B # the columns must sum to 1 so that Q is an assignment
+
+        return Q.t()
+
 def color_distortion(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2):
     color_jitter = torchvision.transforms.ColorJitter(brightness,contrast,saturation,hue)
     return color_jitter
