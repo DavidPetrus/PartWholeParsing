@@ -7,6 +7,7 @@ import pickle as pkl
 import glob
 import cv2
 import random
+import datetime
 from torchvision.transforms import Resize, CenterCrop, Compose, ToTensor, PILToTensor, ColorJitter
 
 from utils import random_crop, color_distortion, loadAde20K, color_normalize, transform_image
@@ -37,7 +38,7 @@ class Coco(torch.utils.data.Dataset):
 
         for split_dir in split_dirs[self.split]:
             self.image_files = glob.glob(f"{FLAGS.data_dir}/coco/{split_dir}/*.jpg")
-            self.label_files = glob.glob(f"{FLAGS.data_dir}/coco/annotations/stuff_{split_dir}_pixelmaps/*.png")
+            self.label_files = glob.glob(f"{FLAGS.data_dir}/coco/stuffthingmaps_trainval2017/{split_dir}/*.png")
             self.image_files.sort()
             self.label_files.sort()
 
@@ -68,8 +69,10 @@ class Coco(torch.utils.data.Dataset):
         label_batch = [[] for c in range(FLAGS.num_crops)]
         crop_dims = []
         for c in range(FLAGS.num_crops):
-            crop_size = np.random.uniform(FLAGS.min_crop,FLAGS.max_crop)
-            crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
+            #crop_size = np.random.uniform(FLAGS.min_crop,1.)
+            crop_size = 0.99
+            #crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
+            crop_dims.append([0,0,1])
 
         batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size)
 
@@ -81,27 +84,35 @@ class Coco(torch.utils.data.Dataset):
                     if img is None: 
                         raise
                     break
-                except:
+                except Exception as e:
+                    print(e)
                     print('-----------------------', img_file)
                     idx = np.random.randint(len(self.image_files))
                     img_file = self.image_files[idx]
                     label_file = self.label_files[idx]
 
-            label[label == 255] = -1  # to be consistent with 10k
-            coarse_label = torch.zeros_like(label)
-            for fine, coarse in self.fine_to_coarse.items():
-                coarse_label[label == fine] = coarse
-            coarse_label[label == -1] = -1
+            label[label == 255] = -1
+
+            if FLAGS.num_output_classes == 28:
+                coarse_label = torch.zeros_like(label)
+                for fine, coarse in self.fine_to_coarse.items():
+                    coarse_label[label == fine] = coarse
+            else:
+                coarse_label = label
+
+            coarse_label[coarse_label == -1] = FLAGS.num_output_classes-1
 
             img = img[:,:,::-1]
             h,w,_ = img.shape
 
             img = transform_image(img)
 
+            cr_dims = [None, 1.]
+
             for c in range(FLAGS.num_crops):
-                cr,_ = random_crop(img, crop_dims=crop_dims[c])
+                cr,_ = random_crop(img, crop_dims=cr_dims[c])
                 lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest')[0].to(torch.long)
-                img_batch[c].append(self.color_jitter(cr))
+                img_batch[c].append(color_normalize(self.color_jitter(cr)))
                 label_batch[c].append(lab_crop)
 
         return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0).squeeze() for cr in label_batch], crop_dims

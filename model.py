@@ -34,24 +34,27 @@ class ImageParser(nn.Module):
         self.prototypes = torch.randn((FLAGS.num_prototypes, FLAGS.output_dim)).to('cuda')
 
         if FLAGS.feed_labels:
-            self.lab_net = nn.Linear(27+FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
+            self.lab_net = nn.Linear(FLAGS.num_output_classes+FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
 
         proj_layers = []
-        '''for l in range(FLAGS.depth):
-            proj_layers.append(AttnBlock(
-                    dim=FLAGS.embd_dim,
-                    num_heads=6,
-                    mlp_ratio=2,
-                    drop=0,
-                    attn_drop=0,
-                    drop_path=0))'''
+        if not FLAGS.mlp_only:
+            for l in range(FLAGS.depth):
+                proj_layers.append(AttnBlock(
+                        dim=FLAGS.embd_dim,
+                        num_heads=6,
+                        mlp_ratio=2,
+                        drop=0,
+                        attn_drop=0,
+                        drop_path=0))
 
-        proj_layers.append(nn.ReLU())
+        #else:
+        #    proj_layers.append(nn.ReLU())
+            
         proj_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.output_dim))
 
         self.proj_layers = nn.Sequential(*proj_layers).to('cuda')
 
-        self.class_pred = nn.Linear(FLAGS.num_prototypes, 27).to('cuda')
+        self.class_pred = nn.Linear(FLAGS.num_prototypes, FLAGS.num_output_classes).to('cuda')
 
     def forward(self, x, labels=None):
         self.model.eval()
@@ -61,7 +64,7 @@ class ImageParser(nn.Module):
 
         if FLAGS.feed_labels:
             labels = F.interpolate(labels.unsqueeze(1).float(), size=28, mode='nearest').reshape(FLAGS.batch_size,-1).long()
-            dino_feat[0] = self.lab_net(torch.cat([dino_feat[0][:,1:], F.one_hot(labels,27).float()], dim=-1))
+            dino_feat[0] = self.lab_net(torch.cat([dino_feat[0][:,1:], F.one_hot(labels,FLAGS.num_output_classes).float()], dim=-1))
             feat = self.proj_layers(dino_feat[0])
         else:
             feat = self.proj_layers(dino_feat[0])[:,1:]

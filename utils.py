@@ -15,7 +15,7 @@ from absl import flags
 
 FLAGS = flags.FLAGS
 
-#color = np.random.randint(0,256,[5120,3],dtype=np.uint8)
+color = np.random.randint(0,256,[255,3],dtype=np.uint8)
 
 
 def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
@@ -24,18 +24,23 @@ def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
         t.div_(s)
     return x
 
+def unnormalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
+    for t, m, s in zip(x, mean, std):
+        t.mul_(s)
+        t.add_(m)
+        
+    return x
+
 def transform_image(img):
     img = img.astype(np.float32)
     img = img / 255.0
-    img = img[:, :, ::-1]
     img = np.transpose(img.copy(), (2, 0, 1))
     img = torch.from_numpy(img).float()
-    img = color_normalize(img)
     
     return img
 
 def random_crop(image, crop_dims=None, min_crop=0.5, inter_mode='bilinear'):
-    c, img_h, img_w = image.shape
+    '''c, img_h, img_w = image.shape
 
     if crop_dims is None:
         crop_size = np.random.uniform(min_crop,min(img_h/img_w,img_w/img_h))
@@ -44,12 +49,19 @@ def random_crop(image, crop_dims=None, min_crop=0.5, inter_mode='bilinear'):
     else:
         crop_size = int(max(img_h,img_w)*crop_dims[2])
         crop_x, crop_y = int(crop_dims[0]*img_w), int(crop_dims[1]*img_h)
+        crop_x = crop_x - crop_x % 12
+        crop_y = crop_y - crop_y % 12
+        crop_size = 336'''
 
-    crop = image[:,crop_y:crop_y+crop_size, crop_x:crop_x+crop_size]
+    if crop_dims is None:
+        #crop = image[:,crop_y:crop_y+crop_size, crop_x:crop_x+crop_size]
+        crop = image[:,0:224,0:224]
+    else:
+        crop = image[:,1:225,1:225]
 
     resized = F.interpolate(crop.unsqueeze(0),size=FLAGS.image_size,mode=inter_mode)
 
-    return resized, [crop_x,crop_y,crop_size]
+    return resized, None
 
 def sinkhorn_knopp(sims):
     with torch.no_grad():
@@ -95,6 +107,17 @@ def calculate_vars(log_dict, level_embds, pca):
         log_dict['var/comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
     return log_dict
+
+def display_label(label):
+    global color
+
+    display = np.zeros([FLAGS.image_size, FLAGS.image_size, 3], dtype=np.uint8)
+    for c in range(FLAGS.num_output_classes-1):
+        display[label == c] = color[c]
+
+    display[label == FLAGS.num_output_classes-1] = 0
+
+    return display
 
 def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
     if reconst is not None:

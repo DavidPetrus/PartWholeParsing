@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import torch
 import torch.nn.functional as F
+#from torchvision import ColorJitter
 import glob
 import datetime
 import time
@@ -10,7 +11,7 @@ import pickle as pkl
 
 from dataloader import ADE20k_2017, ADE_Challenge, Coco
 from model import ImageParser
-from utils import sinkhorn_knopp
+from utils import sinkhorn_knopp, unnormalize, display_label
 import wandb
 
 from absl import flags, app
@@ -21,24 +22,23 @@ flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','coco','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_bool('feed_labels',False,'')
+flags.DEFINE_bool('save_labels',False,'')
 flags.DEFINE_integer('batch_size',32,'')
 flags.DEFINE_float('lr',0.0003,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
-flags.DEFINE_float('max_crop',0.95,'Height/width size of crop')
 
 flags.DEFINE_string('dist_func','cosine','cosine, euc')
+flags.DEFINE_bool('mlp_only', True, '')
 flags.DEFINE_integer('num_prototypes',100,'')
+flags.DEFINE_integer('num_output_classes', 28, '')
 flags.DEFINE_float('epsilon',0.05,'')
 flags.DEFINE_integer('sinkhorn_iters',3,'')
 flags.DEFINE_float('temperature',0.1,'')
 flags.DEFINE_bool('round_q',True,'')
-flags.DEFINE_integer('depth',3,'')
-flags.DEFINE_integer('topk_reg', 10, '')
-flags.DEFINE_float('entropy_coeff',0.1,'')
-flags.DEFINE_float('entropy_temp',0.01,'')
+flags.DEFINE_integer('depth',2,'')
 flags.DEFINE_integer('embd_dim',384,'')
 flags.DEFINE_integer('output_dim',70,'')
 
@@ -101,22 +101,31 @@ def main(argv):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr)
 
+    #color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
+
     fm_size = FLAGS.image_size//8
 
     train_iter = 0
-    torch.autograd.set_detect_anomaly(True)
+    #torch.autograd.set_detect_anomaly(True)
     for epoch in range(10):
         for data in training_generator:
             optimizer.zero_grad()
 
             image_crops, labels, crop_dims = data
+            #print(crop_dims)
+            for c in range(FLAGS.num_crops):
+                image_crops[c] = image_crops[c].to('cuda')
+                labels[c] = labels[c].to('cuda')
+
             features = []
             dists = []
+            print('-----------------')
             for c in range(FLAGS.num_crops):
+
                 if FLAGS.feed_labels:
-                    features.append(model(image_crops[c].to('cuda'), labels=labels[c].to('cuda')).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
+                    features.append(model(image_crops[c], labels=labels[c]).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
                 else:
-                    features.append(model(image_crops[c].to('cuda')).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
+                    features.append(model(image_crops[c]).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
 
                 if FLAGS.dist_func == 'euc':
                     dists.append(((features[c].unsqueeze(-2) - model.prototypes)**2).mean(dim=-1).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_prototypes))
@@ -125,6 +134,20 @@ def main(argv):
                 elif FLAGS.dist_func == 'cosine':
                     dists.append(-(F.normalize(features[c].unsqueeze(-2),dim=-1) * F.normalize(model.prototypes,dim=-1)).sum(dim=-1) \
                         .reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_prototypes))
+
+
+            dist = (F.normalize(features[0],dim=-1) * F.normalize(features[1],dim=-1)).sum(dim=-1)
+            print(dist.mean(dim=(1,2)))
+
+            mat = F.normalize(model.prototypes, dim=-1) @ F.normalize(model.prototypes, dim=-1).t()
+            print(mat.triu(diagonal=1).max(dim=-1)[0].mean())
+
+            print((-dists[0][0,0,0]).topk(10))
+            print((-dists[1][0,0,0]).topk(10))
+            print((-dists[0][0,3,7]).topk(10))
+            print((-dists[1][0,3,7]).topk(10))
+            print((-dists[0][0,15,20]).topk(10))
+            print((-dists[1][0,15,20]).topk(10))
 
             contrastive_loss = 0.
             for c in range(FLAGS.num_crops-1):
@@ -137,12 +160,16 @@ def main(argv):
                     Q_b = sinkhorn_knopp(-dists_crop_b)
                     loss_a = F.cross_entropy(-dists_crop_a/FLAGS.temperature, Q_b)
                     loss_b = F.cross_entropy(-dists_crop_b/FLAGS.temperature, Q_a)
+                    print(loss_a.item(), loss_b.item())
                     contrastive_loss += loss_a + loss_b
 
-            label = labels[0].reshape(-1).to('cuda')
+
+            label = labels[0].reshape(-1)
             preds = F.interpolate(model.class_pred(F.one_hot(torch.argmin(dists[0], dim=-1), FLAGS.num_prototypes).to(torch.float32)).movedim(3,1), \
-                                    size=FLAGS.image_size,mode='nearest').movedim(1,3).reshape(-1, 27)
-            pred_loss = F.cross_entropy(preds, label)
+                                    size=FLAGS.image_size,mode='nearest').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
+            #preds = F.interpolate(model.class_pred(dists[0]).movedim(3,1), \
+            #                        size=FLAGS.image_size,mode='nearest').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
+            pred_loss = F.cross_entropy(preds[label != FLAGS.num_output_classes-1], label[label != FLAGS.num_output_classes-1])
 
             loss = pred_loss + contrastive_loss
 
@@ -150,7 +177,7 @@ def main(argv):
             optimizer.step()
 
             with torch.no_grad():
-                acc = (preds.argmax(dim=-1) == label).to(torch.float32).mean()
+                acc = (preds.argmax(dim=-1)[label != FLAGS.num_output_classes-1] == label[label != FLAGS.num_output_classes-1]).to(torch.float32).mean()
 
                 acc_clust = (dists_crop_a.argmin(dim=-1) == dists_crop_b.argmin(dim=-1)).float().mean()
 
@@ -164,9 +191,17 @@ def main(argv):
                 tenth_highest = avg_samples_per_cluster.topk(10)[0][-1] / total_samples
                 tenth_lowest = -(-avg_samples_per_cluster).topk(10)[0][-1] / total_samples
 
+                if FLAGS.save_labels and train_iter % 1 == 0:
+                    label = label.reshape(FLAGS.batch_size, 1, FLAGS.image_size, FLAGS.image_size)[:1][0,0].cpu().long().numpy()
+                    lab_disp = display_label(label)
+                    cv2.imwrite(f'images/{FLAGS.exp}_{train_iter}_target_lab1.png', lab_disp)
+                    img = (255*unnormalize(image_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
+                    cv2.imwrite(f'images/{FLAGS.exp}_{train_iter}_crop1.png', img)
+
             log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Pred Loss": pred_loss.item(), "Cluster Acc": acc_clust.item(), \
                         "Acc": acc.item(), "Contrastive Loss": contrastive_loss.item(), "Num Clusters": avg_clusters_per_image.item(), \
                         "Most Samples": max_samples.item(), "Least Samples": min_samples.item(), "10th Highest": tenth_highest.item(), "10th Lowest": tenth_lowest.item()}
+            
             if train_iter % 10 == 0:
                 print(log_dict)
 
