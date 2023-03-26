@@ -31,15 +31,13 @@ class ImageParser(nn.Module):
         state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
         self.model.load_state_dict(state_dict, strict=True)
 
-        self.prototypes = torch.randn((FLAGS.num_prototypes, FLAGS.output_dim)).to('cuda')
-
         if FLAGS.feed_labels:
             self.lab_net = nn.Linear(FLAGS.num_output_classes+FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
 
-        proj_layers = []
+        seg_layers = []
         if not FLAGS.mlp_only:
             for l in range(FLAGS.depth):
-                proj_layers.append(AttnBlock(
+                seg_layers.append(AttnBlock(
                         dim=FLAGS.embd_dim,
                         num_heads=6,
                         mlp_ratio=2,
@@ -47,31 +45,38 @@ class ImageParser(nn.Module):
                         attn_drop=0,
                         drop_path=0))
 
-        #else:
-        #    proj_layers.append(nn.ReLU())
+        else:
+            seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
+            seg_layers.append(nn.ReLU())
             
-        proj_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.output_dim))
+        seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
 
-        self.proj_layers = nn.Sequential(*proj_layers).to('cuda')
+        self.seg_layers = nn.Sequential(*seg_layers).to('cuda')
 
-        self.class_pred = nn.Linear(FLAGS.num_prototypes, FLAGS.num_output_classes).to('cuda')
+        self.class_pred = nn.Linear(FLAGS.embd_dim, FLAGS.num_output_classes).to('cuda')
+
+        self.proj_head = vits.DINOHead(FLAGS.embd_dim, FLAGS.output_dim).to('cuda')
 
     def forward(self, x, labels=None):
         self.model.eval()
         with torch.no_grad():
             # get dino activations
-            dino_feat = self.model.get_intermediate_layers(x, n=1)
+            dino_feat = self.model(x)
 
         if FLAGS.feed_labels:
             labels = F.interpolate(labels.unsqueeze(1).float(), size=28, mode='nearest').reshape(FLAGS.batch_size,-1).long()
-            dino_feat[0] = self.lab_net(torch.cat([dino_feat[0][:,1:], F.one_hot(labels,FLAGS.num_output_classes).float()], dim=-1))
-            feat = self.proj_layers(dino_feat[0])
+            dino_feat = self.lab_net(torch.cat([dino_feat[:,1:], F.one_hot(labels,FLAGS.num_output_classes).float()], dim=-1))
+            feat = self.seg_layers(dino_feat)
         else:
-            feat = self.proj_layers(dino_feat[0])[:,1:]
+            feat = self.seg_layers(dino_feat)[:,1:]
 
-        return feat
+        proj_feat = self.proj_head(feat)
+
+        return feat, proj_feat
 
     def match_crops(self, sims_a, sims_b, crop_dims):
+        sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, -1)
+        sims_b = sims_b.reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, -1)
         b,fm_size,_,c = sims_a.shape
         if crop_dims[1][2] > crop_dims[0][2]:
             l_map = sims_b

@@ -211,7 +211,7 @@ class VisionTransformer(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
-        return x[:, 0]
+        return x
 
     def get_last_selfattention(self, x):
         x = self.prepare_tokens(x)
@@ -255,7 +255,7 @@ def vit_base(patch_size=16, **kwargs):
 
 
 class DINOHead(nn.Module):
-    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
+    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=512, bottleneck_dim=256):
         super().__init__()
         nlayers = max(nlayers, 1)
         if nlayers == 1:

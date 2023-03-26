@@ -29,20 +29,17 @@ flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
+flags.DEFINE_float('momentum', 0.996, '')
 
-flags.DEFINE_string('dist_func','cosine','cosine, euc')
-flags.DEFINE_bool('mlp_only', True, '')
-flags.DEFINE_integer('num_prototypes',100,'')
+flags.DEFINE_bool('mlp_only', False, '')
 flags.DEFINE_integer('num_output_classes', 28, '')
-flags.DEFINE_float('epsilon',0.05,'')
-flags.DEFINE_integer('sinkhorn_iters',3,'')
-flags.DEFINE_float('temperature',0.1,'')
-flags.DEFINE_bool('round_q',True,'')
-flags.DEFINE_integer('depth',2,'')
-flags.DEFINE_integer('embd_dim',384,'')
-flags.DEFINE_integer('output_dim',70,'')
+flags.DEFINE_float('student_temp', 0.1, '')
+flags.DEFINE_float('teacher_temp', 0.04, '')
+flags.DEFINE_integer('depth', 2, '')
+flags.DEFINE_integer('embd_dim', 384, '')
+flags.DEFINE_integer('output_dim', 1024, '')
 
-flags.DEFINE_float('aug_strength',0.7,'')
+flags.DEFINE_float('aug_strength', 0.7, '')
 
 
 def main(argv):
@@ -97,11 +94,16 @@ def main(argv):
         validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
 
 
-    model = ImageParser("vit_small")
+    student = ImageParser("vit_small")
+    teacher = ImageParser("vit_small")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr)
+    for param_s, param_t in zip(student.parameters(), teacher.parameters()):
+        param_t.data = param_s.detach().data
 
-    #color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
+    for p in teacher.parameters():
+        p.requires_grad = False
+
+    optimizer = torch.optim.Adam(student.parameters(), lr=FLAGS.lr)
 
     fm_size = FLAGS.image_size//8
 
@@ -117,58 +119,44 @@ def main(argv):
                 image_crops[c] = image_crops[c].to('cuda')
                 labels[c] = labels[c].to('cuda')
 
-            features = []
+            features_s = []
+            features_t = []
+            proj_feats_s = []
+            proj_feats_t = []
             dists = []
-            print('-----------------')
             for c in range(FLAGS.num_crops):
 
                 if FLAGS.feed_labels:
-                    features.append(model(image_crops[c], labels=labels[c]).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
+                    feat_s, proj_feat_s = student(image_crops[c], labels=labels[c])
+                    feat_t, proj_feat_t = teacher(image_crops[c], labels=labels[c])
                 else:
-                    features.append(model(image_crops[c]).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.output_dim))
+                    feat_s, proj_feat_s = student(image_crops[c])
+                    feat_t, proj_feat_t = teacher(image_crops[c])
 
-                if FLAGS.dist_func == 'euc':
-                    dists.append(((features[c].unsqueeze(-2) - model.prototypes)**2).mean(dim=-1).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_prototypes))
-                elif FLAGS.dist_func == 'dot':
-                    dists.append(-(features[c].unsqueeze(-2) * model.prototypes).mean(dim=-1).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_prototypes))
-                elif FLAGS.dist_func == 'cosine':
-                    dists.append(-(F.normalize(features[c].unsqueeze(-2),dim=-1) * F.normalize(model.prototypes,dim=-1)).sum(dim=-1) \
-                        .reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_prototypes))
-
-
-            dist = (F.normalize(features[0],dim=-1) * F.normalize(features[1],dim=-1)).sum(dim=-1)
-            print(dist.mean(dim=(1,2)))
-
-            mat = F.normalize(model.prototypes, dim=-1) @ F.normalize(model.prototypes, dim=-1).t()
-            print(mat.triu(diagonal=1).max(dim=-1)[0].mean())
-
-            print((-dists[0][0,0,0]).topk(10))
-            print((-dists[1][0,0,0]).topk(10))
-            print((-dists[0][0,3,7]).topk(10))
-            print((-dists[1][0,3,7]).topk(10))
-            print((-dists[0][0,15,20]).topk(10))
-            print((-dists[1][0,15,20]).topk(10))
+                features_s.append(feat_s)
+                features_t.append(feat_t)
+                proj_feats_s.append(proj_feat_s)
+                proj_feats_t.append(proj_feat_t)
 
             contrastive_loss = 0.
-            for c in range(FLAGS.num_crops-1):
-                for k in range(c+1, FLAGS.num_crops):
-                    dists_crop_a, dists_crop_b = model.match_crops(dists[c], dists[k], [crop_dims[c], crop_dims[k]])
-                    dists_crop_a = dists_crop_a.reshape(-1, FLAGS.num_prototypes)
-                    dists_crop_b = dists_crop_b.reshape(-1, FLAGS.num_prototypes)
-                    
-                    Q_a = sinkhorn_knopp(-dists_crop_a)
-                    Q_b = sinkhorn_knopp(-dists_crop_b)
-                    loss_a = F.cross_entropy(-dists_crop_a/FLAGS.temperature, Q_b)
-                    loss_b = F.cross_entropy(-dists_crop_b/FLAGS.temperature, Q_a)
-                    print(loss_a.item(), loss_b.item())
-                    contrastive_loss += loss_a + loss_b
+            for s in range(FLAGS.num_crops):
+                for t in range(FLAGS.num_crops):
+                    if s == t:
+                        continue
+
+                    feat_crop_s, feat_crop_t = student.match_crops(proj_feats_s[s], proj_feats_t[t], [crop_dims[s], crop_dims[t]])
+                    feat_crop_s = feat_crop_s.reshape(-1, FLAGS.output_dim)
+                    feat_crop_t = feat_crop_t.reshape(-1, FLAGS.output_dim)
+
+                    # centering (might need to use momentum when training with small batches)
+                    feat_crop_t_center = feat_crop_t - feat_crop_t.mean(dim=0, keepdim=True)
+                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1))
+                    #contrastive_loss += -(F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1) * F.log_softmax(feat_crop_s/FLAGS.student_temp, dim=-1)).sum(dim=-1).mean()
 
 
             label = labels[0].reshape(-1)
-            preds = F.interpolate(model.class_pred(F.one_hot(torch.argmin(dists[0], dim=-1), FLAGS.num_prototypes).to(torch.float32)).movedim(3,1), \
-                                    size=FLAGS.image_size,mode='nearest').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
-            #preds = F.interpolate(model.class_pred(dists[0]).movedim(3,1), \
-            #                        size=FLAGS.image_size,mode='nearest').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
+            preds = F.interpolate(student.class_pred(feat_s).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_output_classes).movedim(3,1), \
+                                    size=FLAGS.image_size,mode='bilinear').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
             pred_loss = F.cross_entropy(preds[label != FLAGS.num_output_classes-1], label[label != FLAGS.num_output_classes-1])
 
             loss = pred_loss + contrastive_loss
@@ -177,11 +165,19 @@ def main(argv):
             optimizer.step()
 
             with torch.no_grad():
+                #m = momentum_schedule[it]  # momentum parameter
+                m = FLAGS.momentum
+                for param_s, param_t in zip(student.parameters(), teacher.parameters()):
+                    param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
+
                 acc = (preds.argmax(dim=-1)[label != FLAGS.num_output_classes-1] == label[label != FLAGS.num_output_classes-1]).to(torch.float32).mean()
 
-                acc_clust = (dists_crop_a.argmin(dim=-1) == dists_crop_b.argmin(dim=-1)).float().mean()
+                acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t_center.argmax(dim=-1)).float().mean()
 
-                avg_clusters_per_image = Q_a.reshape(FLAGS.batch_size, -1, FLAGS.num_prototypes).sum(dim=1)
+                uniq_cat, output_counts = torch.unique(feat_crop_s.argmax(dim=-1), return_counts = True)
+                #print(uniq_cat, output_counts)
+
+                '''avg_clusters_per_image = Q_a.reshape(FLAGS.batch_size, -1, FLAGS.num_prototypes).sum(dim=1)
                 avg_clusters_per_image = (avg_clusters_per_image > 0).float().sum(dim=1).mean()
 
                 avg_samples_per_cluster = Q_a.sum(dim=0)
@@ -189,7 +185,7 @@ def main(argv):
                 max_samples = avg_samples_per_cluster.max() / total_samples
                 min_samples = avg_samples_per_cluster.min() / total_samples
                 tenth_highest = avg_samples_per_cluster.topk(10)[0][-1] / total_samples
-                tenth_lowest = -(-avg_samples_per_cluster).topk(10)[0][-1] / total_samples
+                tenth_lowest = -(-avg_samples_per_cluster).topk(10)[0][-1] / total_samples'''
 
                 if FLAGS.save_labels and train_iter % 1 == 0:
                     label = label.reshape(FLAGS.batch_size, 1, FLAGS.image_size, FLAGS.image_size)[:1][0,0].cpu().long().numpy()
@@ -199,8 +195,7 @@ def main(argv):
                     cv2.imwrite(f'images/{FLAGS.exp}_{train_iter}_crop1.png', img)
 
             log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Pred Loss": pred_loss.item(), "Cluster Acc": acc_clust.item(), \
-                        "Acc": acc.item(), "Contrastive Loss": contrastive_loss.item(), "Num Clusters": avg_clusters_per_image.item(), \
-                        "Most Samples": max_samples.item(), "Least Samples": min_samples.item(), "10th Highest": tenth_highest.item(), "10th Lowest": tenth_lowest.item()}
+                        "Acc": acc.item(), "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0]}
             
             if train_iter % 10 == 0:
                 print(log_dict)

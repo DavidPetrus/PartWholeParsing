@@ -69,10 +69,10 @@ class Coco(torch.utils.data.Dataset):
         label_batch = [[] for c in range(FLAGS.num_crops)]
         crop_dims = []
         for c in range(FLAGS.num_crops):
-            #crop_size = np.random.uniform(FLAGS.min_crop,1.)
-            crop_size = 0.99
-            #crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
-            crop_dims.append([0,0,1])
+            crop_size = np.random.uniform(FLAGS.min_crop,1.)
+            #crop_size = 0.99
+            crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
+            #crop_dims.append([0,0,1])
 
         batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size)
 
