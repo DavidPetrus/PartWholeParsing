@@ -29,7 +29,9 @@ flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
-flags.DEFINE_float('momentum', 0.996, '')
+flags.DEFINE_float('teacher_momentum', 0.996, '')
+flags.DEFINE_bool('center_batch_wise', False, '')
+flags.DEFINE_float('centering_momentum',0.9,'')
 
 flags.DEFINE_bool('mlp_only', False, '')
 flags.DEFINE_integer('num_output_classes', 28, '')
@@ -97,8 +99,7 @@ def main(argv):
     student = ImageParser("vit_small")
     teacher = ImageParser("vit_small")
 
-    for param_s, param_t in zip(student.parameters(), teacher.parameters()):
-        param_t.data = param_s.detach().data
+    teacher.load_state_dict(student.state_dict())
 
     for p in teacher.parameters():
         p.requires_grad = False
@@ -106,6 +107,7 @@ def main(argv):
     optimizer = torch.optim.Adam(student.parameters(), lr=FLAGS.lr)
 
     fm_size = FLAGS.image_size//8
+    center = torch.zeros(1, FLAGS.output_dim).to('cuda')
 
     train_iter = 0
     #torch.autograd.set_detect_anomaly(True)
@@ -125,7 +127,6 @@ def main(argv):
             proj_feats_t = []
             dists = []
             for c in range(FLAGS.num_crops):
-
                 if FLAGS.feed_labels:
                     feat_s, proj_feat_s = student(image_crops[c], labels=labels[c])
                     feat_t, proj_feat_t = teacher(image_crops[c], labels=labels[c])
@@ -148,9 +149,12 @@ def main(argv):
                     feat_crop_s = feat_crop_s.reshape(-1, FLAGS.output_dim)
                     feat_crop_t = feat_crop_t.reshape(-1, FLAGS.output_dim)
 
-                    # centering (might need to use momentum when training with small batches)
-                    feat_crop_t_center = feat_crop_t - feat_crop_t.mean(dim=0, keepdim=True)
-                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1))
+                    # centering
+                    if FLAGS.center_batch_wise:
+                        center = proj_feat_t.reshape(-1, FLAGS.output_dim).mean(dim=0, keepdim=True)
+
+                    feat_crop_t_center = feat_crop_t - center
+                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1).detach())
                     #contrastive_loss += -(F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1) * F.log_softmax(feat_crop_s/FLAGS.student_temp, dim=-1)).sum(dim=-1).mean()
 
 
@@ -166,7 +170,7 @@ def main(argv):
 
             with torch.no_grad():
                 #m = momentum_schedule[it]  # momentum parameter
-                m = FLAGS.momentum
+                m = FLAGS.teacher_momentum
                 for param_s, param_t in zip(student.parameters(), teacher.parameters()):
                     param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
 
@@ -174,8 +178,14 @@ def main(argv):
 
                 acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t_center.argmax(dim=-1)).float().mean()
 
-                uniq_cat, output_counts = torch.unique(feat_crop_s.argmax(dim=-1), return_counts = True)
+                uniq_cat, output_counts = torch.unique(proj_feat_t.argmax(dim=-1), return_counts = True)
+
+                if not FLAGS.center_batch_wise:
+                    center = FLAGS.centering_momentum * center + (1 - FLAGS.centering_momentum) * proj_feat_t.reshape(-1, FLAGS.output_dim).mean(dim=0, keepdim=True)
+                    
+                #print("-----------------------")
                 #print(uniq_cat, output_counts)
+                #print(center[0, uniq_cat])
 
                 '''avg_clusters_per_image = Q_a.reshape(FLAGS.batch_size, -1, FLAGS.num_prototypes).sum(dim=1)
                 avg_clusters_per_image = (avg_clusters_per_image > 0).float().sum(dim=1).mean()

@@ -113,7 +113,10 @@ class ImageParser(nn.Module):
         
         fm_s_crop = F.interpolate(fm_s_crop.movedim(3,1), size=(fm_l_crop.shape[1], fm_l_crop.shape[2]), mode='bilinear', align_corners=False).movedim(1,3)
 
-        return fm_l_crop, fm_s_crop
+        if crop_dims[1][2] > crop_dims[0][2]:
+            return fm_s_crop, fm_l_crop
+        else:
+            return fm_l_crop, fm_s_crop
 
 
 class Mlp(nn.Module):
