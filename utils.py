@@ -63,6 +63,26 @@ def random_crop(image, crop_dims=None, min_crop=0.5, inter_mode='bilinear'):
 
     return resized, None
 
+
+def vic_reg(x):
+
+    x = x.reshape(FLAGS.batch_size,-1,FLAGS.output_dim)
+    x = x - x.mean(dim=1, keepdim=True)
+    std_x = torch.sqrt(x.var(dim=1) + 0.0001)
+    std_loss = torch.mean(F.relu(FLAGS.min_std - std_x))
+
+    cov_x = torch.matmul(x.movedim(1,2),x) / (x.shape[1] - 1)
+    cov_loss = off_diagonal(cov_x).pow_(2).sum().div(FLAGS.batch_size*FLAGS.output_dim)
+
+    return std_loss, cov_loss
+
+
+def off_diagonal(x):
+    b, n, m = x.shape
+    assert n == m
+    return x.reshape(b,-1)[:,:-1].reshape(b, n - 1, n + 1)[:,:,1:].reshape(b,-1)
+
+
 def sinkhorn_knopp(sims):
     with torch.no_grad():
         Q = F.softmax(sims.reshape(-1) / FLAGS.epsilon, dim=0).reshape(-1, FLAGS.num_prototypes).t() # Q is K-by-B for consistency with notations from our paper
