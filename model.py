@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import copy
+import numpy as np
 
 import dino.vision_transformer as vits
 from utils import find_clusters
@@ -21,7 +23,7 @@ class ImageParser(nn.Module):
         for p in self.model.parameters():
             p.requires_grad = False
         self.model.eval().cuda()
-        self.dropout = nn.Dropout2d(p=.1)
+        #self.dropout = nn.Dropout2d(p=.1)
 
         if arch == "vit_small":
             url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
@@ -35,29 +37,61 @@ class ImageParser(nn.Module):
             self.lab_net = nn.Linear(FLAGS.num_output_classes+FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
 
         seg_layers = []
-        if not FLAGS.mlp_only:
-            for l in range(FLAGS.depth):
-                seg_layers.append(AttnBlock(
-                        dim=FLAGS.embd_dim,
-                        num_heads=6,
-                        mlp_ratio=2,
-                        drop=0,
-                        attn_drop=0,
-                        drop_path=0))
-
-        else:
-            seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
-            seg_layers.append(nn.ReLU())
+        for l in range(FLAGS.depth):
+            seg_layers.append(AttnBlock(
+                    dim=FLAGS.embd_dim,
+                    num_heads=6,
+                    mlp_ratio=2,
+                    drop=0,
+                    attn_drop=0,
+                    drop_path=0))
             
         seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
 
         self.seg_layers = nn.Sequential(*seg_layers).to('cuda')
 
-        self.class_pred = nn.Linear(FLAGS.embd_dim, FLAGS.num_output_classes).to('cuda')
+        #self.class_pred = nn.Linear(FLAGS.embd_dim, FLAGS.num_output_classes).to('cuda')
 
-        self.proj_head = vits.DINOHead(FLAGS.embd_dim, FLAGS.output_dim).to('cuda')
+        # Transformer Decoder
 
-    def forward(self, x, labels=None):
+        decoder_layer = TransformerDecoderLayer(
+            FLAGS.embd_dim, 6, FLAGS.embd_dim*2, dropout=0.
+        )
+        decoder_norm = nn.LayerNorm(FLAGS.embd_dim)
+        self.decoder = TransformerDecoder(
+            decoder_layer,
+            FLAGS.num_decoder_layers,
+            decoder_norm,
+            return_intermediate=False,
+        ).to('cuda')
+
+        N_steps = FLAGS.embd_dim // 2
+        self.pe_layer = PositionEmbeddingSine(N_steps, normalize=True).to('cuda')
+
+        self.query_embed = nn.Embedding(FLAGS.num_masks, FLAGS.embd_dim).to('cuda')
+
+        self.mask_embed = Mlp(FLAGS.embd_dim, 2*FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
+
+        self.pixel_decoder = nn.Sequential(nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, 3, padding='same'), nn.Upsample(scale_factor=2.), \
+                                           nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, 3, padding='same')).to('cuda')
+
+    def forward_decoder(self, x):
+        bs, c, h, w = x.shape
+        pos_embed = self.pe_layer(x).flatten(2).permute(2, 0, 1)
+        x = x.flatten(2).permute(2, 0, 1) # l, bs, c
+        
+        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
+
+        tgt = torch.zeros_like(query_embed)
+        hs = self.decoder(
+            tgt, x, memory_key_padding_mask=None, pos=pos_embed, query_pos=query_embed
+        ) # l, bs, c
+
+        mask_embed = self.mask_embed(hs.transpose(0,1)) # [bs, queries, embed]
+
+        return mask_embed
+
+    def forward_encoder(self, x):
         self.model.eval()
         with torch.no_grad():
             # get dino activations
@@ -70,13 +104,24 @@ class ImageParser(nn.Module):
         else:
             feat = self.seg_layers(dino_feat)[:,1:]
 
-        proj_feat = self.proj_head(feat)
+        return feat # bs, l, c
 
-        return feat, proj_feat
+    def forward(self, x, labels=None):
+        # x.shape == bs,3,h,w
+        features = self.forward_encoder(x) # bs, l, c
+        features = features.movedim(2,1).reshape(FLAGS.batch_size, FLAGS.embd_dim, FLAGS.image_size//8, FLAGS.image_size//8)
+        
+        mask_embed = self.forward_decoder(features) # bs, num_queries, embd_dim
+        mask_features = self.pixel_decoder(features) # bs, embd_dim, h, w
+
+        outputs_seg_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+
+        return outputs_seg_masks
+        
 
     def match_crops(self, sims_a, sims_b, crop_dims):
-        sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, -1)
-        sims_b = sims_b.reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, -1)
+        sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.image_size//FLAGS.output_patch_size, FLAGS.image_size//FLAGS.output_patch_size, FLAGS.num_masks)
+        sims_b = sims_b.reshape(FLAGS.batch_size, FLAGS.image_size//FLAGS.output_patch_size, FLAGS.image_size//FLAGS.output_patch_size, FLAGS.num_masks)
         b,fm_size,_,c = sims_a.shape
         if crop_dims[1][2] > crop_dims[0][2]:
             l_map = sims_b
@@ -236,3 +281,159 @@ class AttnBlock(nn.Module):
         x = x + self.drop_path(self.attn(self.norm1(x), mask=mask))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
+
+
+class TransformerDecoder(nn.Module):
+    def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
+        super().__init__()
+        self.layers = _get_clones(decoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.norm = norm
+        self.return_intermediate = return_intermediate
+
+    def forward(
+        self,
+        tgt,
+        memory,
+        tgt_mask = None,
+        memory_mask = None,
+        tgt_key_padding_mask = None,
+        memory_key_padding_mask = None,
+        pos = None,
+        query_pos = None,
+    ):
+        output = tgt
+
+        intermediate = []
+
+        for layer in self.layers:
+            output = layer(
+                output,
+                memory,
+                tgt_mask=tgt_mask,
+                memory_mask=memory_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+                pos=pos,
+                query_pos=query_pos,
+            )
+            if self.return_intermediate:
+                intermediate.append(self.norm(output))
+
+        if self.norm is not None:
+            output = self.norm(output)
+            if self.return_intermediate:
+                intermediate.pop()
+                intermediate.append(output)
+
+        if self.return_intermediate:
+            return torch.stack(intermediate)
+
+        return output
+
+
+class TransformerDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        dim_feedforward=2048,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+
+        self.activation = F.relu
+
+    def with_pos_embed(self, tensor, pos = None):
+        return tensor if pos is None else tensor + pos
+
+    def forward(
+        self,
+        tgt,
+        memory,
+        tgt_mask = None,
+        memory_mask = None,
+        tgt_key_padding_mask = None,
+        memory_key_padding_mask = None,
+        pos = None,
+        query_pos = None,
+    ):
+        q = k = self.with_pos_embed(tgt, query_pos)
+        tgt2 = self.self_attn(
+            q, k, value=tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
+        )[0]
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
+        tgt2 = self.multihead_attn(
+            query=self.with_pos_embed(tgt, query_pos),
+            key=self.with_pos_embed(memory, pos),
+            value=memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+        )[0]
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
+        return tgt
+
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+class PositionEmbeddingSine(nn.Module):
+    """
+    This is a more standard version of the position embedding, very similar to the one
+    used by the Attention is all you need paper, generalized to work on images.
+    """
+
+    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        if scale is not None and normalize is False:
+            raise ValueError("normalize should be True if scale is passed")
+        if scale is None:
+            scale = 2 * np.pi
+        self.scale = scale
+
+    def forward(self, x, mask=None):
+        if mask is None:
+            mask = torch.zeros((x.size(0), x.size(2), x.size(3)), device=x.device, dtype=torch.bool)
+        not_mask = ~mask
+        y_embed = not_mask.cumsum(1, dtype=torch.float32)
+        x_embed = not_mask.cumsum(2, dtype=torch.float32)
+        if self.normalize:
+            eps = 1e-6
+            y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
+            x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
+
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+
+        pos_x = x_embed[:, :, :, None] / dim_t
+        pos_y = y_embed[:, :, :, None] / dim_t
+        pos_x = torch.stack(
+            (pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4
+        ).flatten(3)
+        pos_y = torch.stack(
+            (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
+        ).flatten(3)
+        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+        return pos

@@ -12,6 +12,8 @@ import pickle as pkl
 from dataloader import ADE20k_2017, ADE_Challenge, Coco
 from model import ImageParser
 from utils import sinkhorn_knopp, unnormalize, display_label, vic_reg
+from matcher import HungarianMatcher, calc_loss
+
 import wandb
 
 from absl import flags, app
@@ -29,23 +31,20 @@ flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
-flags.DEFINE_float('teacher_momentum', 0.996, '')
-flags.DEFINE_bool('center_batch_wise', False, '')
-flags.DEFINE_float('centering_momentum',0.9,'')
-flags.DEFINE_float('min_std', 0.2, '')
-flags.DEFINE_float('std_coeff', 1, '')
-flags.DEFINE_float('cov_coeff', 10., '')
-flags.DEFINE_float('entropy_reg', 0.1, '')
-flags.DEFINE_integer('image_topk',10,'')
+flags.DEFINE_float('teacher_momentum', 0.98, '')
+flags.DEFINE_integer('num_masks', 100,'')
+flags.DEFINE_integer('num_decoder_layers', 3, '')
+flags.DEFINE_integer('output_patch_size', 4, '')
+flags.DEFINE_float('mask_reg_coeff',1.,'')
 
-flags.DEFINE_bool('mlp_only', False, '')
+flags.DEFINE_float('min_pos_pixels',0.02,'')
+flags.DEFINE_float('max_pos_pixels',0.3,'')
+
 flags.DEFINE_integer('num_output_classes', 28, '')
-flags.DEFINE_float('entropy_temp', 0.05, '')
-flags.DEFINE_float('student_temp', 0.1, '')
-flags.DEFINE_float('teacher_temp', 0.04, '')
-flags.DEFINE_integer('depth', 2, '')
+flags.DEFINE_float('student_temp',0.2,'')
+flags.DEFINE_float('teacher_temp', 0.01, '')
+flags.DEFINE_integer('depth', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
-flags.DEFINE_integer('output_dim', 256, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 
@@ -107,15 +106,14 @@ def main(argv):
 
     teacher.load_state_dict(student.state_dict())
 
+    quantiles_tensor = torch.Tensor([1-FLAGS.min_pos_pixels, 1-FLAGS.max_pos_pixels]).to('cuda')
+
     for p in teacher.parameters():
         p.requires_grad = False
 
     optimizer = torch.optim.Adam(student.parameters(), lr=FLAGS.lr)
 
-    fm_size = FLAGS.image_size//8
-    center = torch.zeros(1, FLAGS.output_dim).to('cuda')
-
-    entropy_norm = -np.log(1/FLAGS.output_dim)
+    matcher = HungarianMatcher()
 
     train_iter = 0
     #torch.autograd.set_detect_anomaly(True)
@@ -124,61 +122,60 @@ def main(argv):
             optimizer.zero_grad()
 
             image_crops, labels, crop_dims = data
-            #print(crop_dims)
             for c in range(FLAGS.num_crops):
                 image_crops[c] = image_crops[c].to('cuda')
                 labels[c] = labels[c].to('cuda')
 
-            features_s = []
-            features_t = []
-            proj_feats_s = []
-            proj_feats_t = []
-            dists = []
-            entropy_reg = 0.
+            all_masks_s = []
+            all_masks_t = []
+            reg_loss = 0.
             for c in range(FLAGS.num_crops):
                 if FLAGS.feed_labels:
                     feat_s, proj_feat_s = student(image_crops[c], labels=labels[c])
                     feat_t, proj_feat_t = teacher(image_crops[c], labels=labels[c])
                 else:
-                    feat_s, proj_feat_s = student(image_crops[c])
-                    feat_t, proj_feat_t = teacher(image_crops[c])
+                    masks_s = student(image_crops[c]) # bs, num_masks, h, w
+                    masks_t = teacher(image_crops[c])
 
-                features_s.append(feat_s)
-                features_t.append(feat_t)
-                proj_feats_s.append(proj_feat_s)
-                proj_feats_t.append(proj_feat_t)
+                with torch.no_grad():
+                    frac_pos_pix = (masks_t > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
+                    #frac_pos_pix_s = (masks_s > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
+                    #print("==============")
+                    #print(frac_pos_pix_s.min(), frac_pos_pix_s.max())
+                    quantiles = torch.quantile(masks_t.flatten(2), quantiles_tensor, dim=2).unsqueeze(-1).unsqueeze(-1) # 2, bs, num_masks, 1, 1
+                    masks_t = torch.where(frac_pos_pix < FLAGS.min_pos_pixels, masks_t-quantiles[0], masks_t)
+                    masks_t = torch.where(frac_pos_pix > FLAGS.max_pos_pixels, masks_t-quantiles[1], masks_t)
 
-                entropy_reg += -torch.log(torch.topk(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=1), FLAGS.image_topk, dim=1)[0]).mean()
+                    frac_pos_pix = (masks_t > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
+                    #print(frac_pos_pix.min(), frac_pos_pix.max())
 
-            contrastive_loss = 0.
-            std_reg, cov_reg = 0., 0.
+                reg_loss += masks_s.sigmoid().mean()
+
+                all_masks_s.append(masks_s)
+                all_masks_t.append(masks_t)
+
+            dice_loss, focal_loss = 0., 0.
             for s in range(FLAGS.num_crops):
                 for t in range(FLAGS.num_crops):
                     if s == t:
                         continue
 
-                    feat_crop_s, feat_crop_t = student.match_crops(proj_feats_s[s], proj_feats_t[t], [crop_dims[s], crop_dims[t]])
-                    feat_crop_s = feat_crop_s.reshape(-1, FLAGS.output_dim)
-                    feat_crop_t = feat_crop_t.reshape(-1, FLAGS.output_dim)
+                    mask_crop_s, mask_crop_t = student.match_crops(all_masks_s[s], all_masks_t[t], [crop_dims[s], crop_dims[t]]) # bs,h,w,num_masks
+                    mask_crop_s = mask_crop_s.movedim(3,1) / FLAGS.student_temp # bs,num_masks,h,w
+                    mask_crop_t = mask_crop_t.movedim(3,1) / FLAGS.teacher_temp
+                    matched_indices, num_masks_t = matcher(mask_crop_s, mask_crop_t)
+                    losses = calc_loss(mask_crop_s, mask_crop_t.sigmoid(), matched_indices)
 
-                    # centering
-                    if FLAGS.center_batch_wise:
-                        center = proj_feat_t.reshape(-1, FLAGS.output_dim).mean(dim=0, keepdim=True)
+                    dice_loss += losses["loss_dice"]
+                    focal_loss += losses["loss_mask"]
 
-                    feat_crop_t_center = feat_crop_t - center
-                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1).detach())
-                    #contrastive_loss += -(F.softmax(feat_crop_t_center/FLAGS.teacher_temp, dim=-1) * F.log_softmax(feat_crop_s/FLAGS.student_temp, dim=-1)).sum(dim=-1).mean()
 
-                #std_loss, cov_loss = vic_reg(proj_feats_s[s])
-                #std_reg += std_loss
-                #cov_reg += cov_loss
-
-            label = labels[0].reshape(-1)
+            '''label = labels[0].reshape(-1)
             preds = F.interpolate(student.class_pred(feat_s.detach()).reshape(FLAGS.batch_size, fm_size, fm_size, FLAGS.num_output_classes).movedim(3,1), \
                                     size=FLAGS.image_size,mode='bilinear').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
-            pred_loss = F.cross_entropy(preds[label != FLAGS.num_output_classes-1], label[label != FLAGS.num_output_classes-1])
+            pred_loss = F.cross_entropy(preds[label != FLAGS.num_output_classes-1], label[label != FLAGS.num_output_classes-1])'''
 
-            loss = pred_loss + contrastive_loss + FLAGS.entropy_reg*entropy_reg
+            loss = 0.05*dice_loss + focal_loss + FLAGS.mask_reg_coeff*reg_loss
 
             loss.backward()
             optimizer.step()
@@ -189,7 +186,12 @@ def main(argv):
                 for param_s, param_t in zip(student.parameters(), teacher.parameters()):
                     param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
 
-                acc = (preds.argmax(dim=-1)[label != FLAGS.num_output_classes-1] == label[label != FLAGS.num_output_classes-1]).to(torch.float32).mean()
+                frac_pos_pix = (masks_s > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
+                min_pos_pix = frac_pos_pix.min(dim=1)[0].mean()
+                max_pos_pix = frac_pos_pix.max(dim=1)[0].mean()
+                mean_pos_pix = frac_pos_pix.mean()
+
+                '''acc = (preds.argmax(dim=-1)[label != FLAGS.num_output_classes-1] == label[label != FLAGS.num_output_classes-1]).to(torch.float32).mean()
 
                 acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t_center.argmax(dim=-1)).float().mean()
 
@@ -201,23 +203,6 @@ def main(argv):
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
-                if not FLAGS.center_batch_wise:
-                    center = FLAGS.centering_momentum * center + (1 - FLAGS.centering_momentum) * proj_feat_t.reshape(-1, FLAGS.output_dim).mean(dim=0, keepdim=True)
-
-                #print("-----------------------")
-                #print(uniq_cat, output_counts)
-                #print(center[0, uniq_cat])
-
-                '''avg_clusters_per_image = Q_a.reshape(FLAGS.batch_size, -1, FLAGS.num_prototypes).sum(dim=1)
-                avg_clusters_per_image = (avg_clusters_per_image > 0).float().sum(dim=1).mean()
-
-                avg_samples_per_cluster = Q_a.sum(dim=0)
-                total_samples = avg_samples_per_cluster.sum()
-                max_samples = avg_samples_per_cluster.max() / total_samples
-                min_samples = avg_samples_per_cluster.min() / total_samples
-                tenth_highest = avg_samples_per_cluster.topk(10)[0][-1] / total_samples
-                tenth_lowest = -(-avg_samples_per_cluster).topk(10)[0][-1] / total_samples'''
-
                 if train_iter > 0:
                     label = label.reshape(FLAGS.batch_size, 1, FLAGS.image_size, FLAGS.image_size)[:1][0,0].cpu().long().numpy()
                     lab_disp = display_label(label)
@@ -226,15 +211,11 @@ def main(argv):
                     cv2.imwrite(f'images/{FLAGS.exp}_{train_iter}_crop1.png', img)
 
                     np.save(f'images/{FLAGS.exp}_{train_iter}_student.npy', proj_feats_s[0].cpu().numpy())
-                    np.save(f'images/{FLAGS.exp}_{train_iter}_teacher.npy', proj_feats_t[1].cpu().numpy())
+                    np.save(f'images/{FLAGS.exp}_{train_iter}_teacher.npy', proj_feats_t[1].cpu().numpy())'''
 
 
-                if train_iter > 3030:
-                    exit()
-
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Pred Loss": pred_loss.item(), "Cluster Acc": acc_clust.item(), \
-                        "Acc": acc.item(), "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
-                        "Entropy Reg": entropy_reg.item(), "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Dice Loss": dice_loss.item(), "Focal Loss": focal_loss.item(), "Mask Reg Loss": reg_loss, \
+                        "Min Pos Pix": min_pos_pix, "Max Pos Pix": max_pos_pix, "Mean Pos Pix": mean_pos_pix, "Num Masks Teacher": num_masks_t}
             
             if train_iter % 10 == 0:
                 print(log_dict)
