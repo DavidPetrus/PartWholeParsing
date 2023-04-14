@@ -49,7 +49,7 @@ def dice_loss(inputs, targets):
     return loss.sum() / inputs.shape[0]
 
 
-def sigmoid_focal_loss(inputs, targets, alpha: float = 0.5, gamma: float = 0):
+def sigmoid_focal_loss(inputs, targets):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -68,10 +68,10 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.5, gamma: float = 0):
     prob = inputs.sigmoid()
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     p_t = prob * targets + (1 - prob) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
+    loss = ce_loss * ((1 - p_t) ** FLAGS.gamma)
 
-    if alpha >= 0:
-        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+    if FLAGS.alpha >= 0:
+        alpha_t = FLAGS.alpha * targets + (1 - FLAGS.alpha) * (1 - targets)
         loss = alpha_t * loss
 
     return loss.mean(1).sum() / inputs.shape[0]
@@ -95,7 +95,7 @@ def batch_dice_loss(inputs, targets):
     return loss
 
 
-def batch_sigmoid_focal_loss(inputs, targets, alpha: float = 0.5, gamma: float = 0):
+def batch_sigmoid_focal_loss(inputs, targets):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -114,15 +114,15 @@ def batch_sigmoid_focal_loss(inputs, targets, alpha: float = 0.5, gamma: float =
     hw = inputs.shape[1]
 
     prob = inputs.sigmoid()
-    focal_pos = ((1 - prob) ** gamma) * F.binary_cross_entropy_with_logits(
+    focal_pos = ((1 - prob) ** FLAGS.gamma) * F.binary_cross_entropy_with_logits(
         inputs, torch.ones_like(inputs), reduction="none"
     )
-    focal_neg = (prob ** gamma) * F.binary_cross_entropy_with_logits(
+    focal_neg = (prob ** FLAGS.gamma) * F.binary_cross_entropy_with_logits(
         inputs, torch.zeros_like(inputs), reduction="none"
     )
-    if alpha >= 0:
-        focal_pos = focal_pos * alpha
-        focal_neg = focal_neg * (1 - alpha)
+    if FLAGS.alpha >= 0:
+        focal_pos = focal_pos * FLAGS.alpha
+        focal_neg = focal_neg * (1 - FLAGS.alpha)
 
     loss = torch.einsum("nc,mc->nm", focal_pos, targets) + torch.einsum(
         "nc,mc->nm", focal_neg, (1 - targets)

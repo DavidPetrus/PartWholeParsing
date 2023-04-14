@@ -76,6 +76,7 @@ class ImageParser(nn.Module):
                                            nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, 3, padding='same')).to('cuda')
 
     def forward_decoder(self, x):
+
         bs, c, h, w = x.shape
         pos_embed = self.pe_layer(x).flatten(2).permute(2, 0, 1)
         x = x.flatten(2).permute(2, 0, 1) # l, bs, c
@@ -113,8 +114,9 @@ class ImageParser(nn.Module):
         
         mask_embed = self.forward_decoder(features) # bs, num_queries, embd_dim
         mask_features = self.pixel_decoder(features) # bs, embd_dim, h, w
+        pos_embed = self.pe_layer(mask_features)
 
-        outputs_seg_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+        outputs_seg_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features+pos_embed)
 
         return outputs_seg_masks
         

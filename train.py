@@ -36,17 +36,23 @@ flags.DEFINE_integer('num_masks', 100,'')
 flags.DEFINE_integer('num_decoder_layers', 3, '')
 flags.DEFINE_integer('output_patch_size', 4, '')
 flags.DEFINE_float('mask_reg_coeff',1.,'')
+flags.DEFINE_float('mask_cover_coeff',0.03,'')
+flags.DEFINE_float('mask_cover_temp',0.1,'')
+flags.DEFINE_float('alpha',0.5,'')
+flags.DEFINE_float('gamma',0.,'')
+flags.DEFINE_float('mean_max_sub', 0.5, '')
 
 flags.DEFINE_float('min_pos_pixels',0.02,'')
 flags.DEFINE_float('max_pos_pixels',0.3,'')
 
 flags.DEFINE_integer('num_output_classes', 28, '')
 flags.DEFINE_float('student_temp',0.2,'')
-flags.DEFINE_float('teacher_temp', 0.01, '')
+flags.DEFINE_float('teacher_temp', 0.03, '')
 flags.DEFINE_integer('depth', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
+flags.DEFINE_float('clip_grad', 300, '')
 
 
 def main(argv):
@@ -106,8 +112,6 @@ def main(argv):
 
     teacher.load_state_dict(student.state_dict())
 
-    quantiles_tensor = torch.Tensor([1-FLAGS.min_pos_pixels, 1-FLAGS.max_pos_pixels]).to('cuda')
-
     for p in teacher.parameters():
         p.requires_grad = False
 
@@ -116,7 +120,7 @@ def main(argv):
     matcher = HungarianMatcher()
 
     train_iter = 0
-    #torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(True)
     for epoch in range(10):
         for data in training_generator:
             optimizer.zero_grad()
@@ -129,6 +133,7 @@ def main(argv):
             all_masks_s = []
             all_masks_t = []
             reg_loss = 0.
+            mask_cover_loss = 0.
             for c in range(FLAGS.num_crops):
                 if FLAGS.feed_labels:
                     feat_s, proj_feat_s = student(image_crops[c], labels=labels[c])
@@ -137,17 +142,15 @@ def main(argv):
                     masks_s = student(image_crops[c]) # bs, num_masks, h, w
                     masks_t = teacher(image_crops[c])
 
-                with torch.no_grad():
-                    frac_pos_pix = (masks_t > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
-                    #frac_pos_pix_s = (masks_s > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
-                    #print("==============")
-                    #print(frac_pos_pix_s.min(), frac_pos_pix_s.max())
-                    quantiles = torch.quantile(masks_t.flatten(2), quantiles_tensor, dim=2).unsqueeze(-1).unsqueeze(-1) # 2, bs, num_masks, 1, 1
-                    masks_t = torch.where(frac_pos_pix < FLAGS.min_pos_pixels, masks_t-quantiles[0], masks_t)
-                    masks_t = torch.where(frac_pos_pix > FLAGS.max_pos_pixels, masks_t-quantiles[1], masks_t)
+                # Normalize masks to ensure each mask has some positive pixels
+                masks_s = masks_s - FLAGS.mean_max_sub * (masks_s.mean(dim=(2,3), keepdim=True) + masks_s.flatten(2).max(dim=2, keepdim=True)[0].unsqueeze(-1))
+                masks_t = masks_t - FLAGS.mean_max_sub * (masks_t.mean(dim=(2,3), keepdim=True) + masks_t.flatten(2).max(dim=2, keepdim=True)[0].unsqueeze(-1))
 
-                    frac_pos_pix = (masks_t > 0).float().mean(dim=(2,3), keepdim=True) # bs, num_masks, 1, 1
-                    #print(frac_pos_pix.min(), frac_pos_pix.max())
+                mask_cover_loss += -F.log_softmax((F.relu(masks_s).sum(dim=1).flatten(1) + 1).log2() / FLAGS.mask_cover_temp, dim=1).mean()
+                num_pos_per_pixel = (masks_s > 0).sum(dim=1) # bs,h,w
+                min_num_pos = num_pos_per_pixel.flatten(1).min(dim=1)[0].float().mean()
+                max_num_pos = num_pos_per_pixel.flatten(1).max(dim=1)[0].float().mean()
+                frac_covered = (num_pos_per_pixel > 0).float().mean(dim=(1,2))
 
                 reg_loss += masks_s.sigmoid().mean()
 
@@ -175,9 +178,10 @@ def main(argv):
                                     size=FLAGS.image_size,mode='bilinear').movedim(1,3).reshape(-1, FLAGS.num_output_classes)
             pred_loss = F.cross_entropy(preds[label != FLAGS.num_output_classes-1], label[label != FLAGS.num_output_classes-1])'''
 
-            loss = 0.05*dice_loss + focal_loss + FLAGS.mask_reg_coeff*reg_loss
+            loss = 0.05*dice_loss + focal_loss + FLAGS.mask_reg_coeff*reg_loss + FLAGS.mask_cover_coeff*mask_cover_loss
 
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), FLAGS.clip_grad)
             optimizer.step()
 
             with torch.no_grad():
@@ -214,8 +218,11 @@ def main(argv):
                     np.save(f'images/{FLAGS.exp}_{train_iter}_teacher.npy', proj_feats_t[1].cpu().numpy())'''
 
 
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Dice Loss": dice_loss.item(), "Focal Loss": focal_loss.item(), "Mask Reg Loss": reg_loss, \
-                        "Min Pos Pix": min_pos_pix, "Max Pos Pix": max_pos_pix, "Mean Pos Pix": mean_pos_pix, "Num Masks Teacher": num_masks_t}
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Dice Loss": dice_loss.item(), "Focal Loss": focal_loss.item(), "Mask Reg Loss": reg_loss.item(), \
+                        "Min Pos Frac": min_pos_pix.item(), "Mean Pos Frac": mean_pos_pix.item(), "Max Pos Frac": max_pos_pix.item(), "Num Masks Teacher": num_masks_t, \
+                        "Grad Norm": grad_norm.item(), "Mask Cover Loss": mask_cover_loss.item(), "Min Masks Pixel": min_num_pos.item(), \
+                        "Mean Masks Pixel": num_pos_per_pixel.float().mean().item(), "Max Masks Pixel": max_num_pos.item(), "Min Frac Covered": frac_covered.min().item(), \
+                        "Mean Frac Covered": frac_covered.mean().item(), "Max Frac Covered": frac_covered.max().item()}
             
             if train_iter % 10 == 0:
                 print(log_dict)
