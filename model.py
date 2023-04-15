@@ -72,7 +72,7 @@ class ImageParser(nn.Module):
 
         proj_feat = self.proj_head(feat)
 
-        return feat, proj_feat
+        return proj_feat
 
     def match_crops(self, sims_a, sims_b, crop_dims):
         sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, -1)
