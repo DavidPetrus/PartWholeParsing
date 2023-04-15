@@ -70,9 +70,7 @@ class Coco(torch.utils.data.Dataset):
         crop_dims = []
         for c in range(FLAGS.num_crops):
             crop_size = np.random.uniform(FLAGS.min_crop,1.)
-            #crop_size = 0.99
             crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
-            #crop_dims.append([0,0,1])
 
         batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size)
 
@@ -107,11 +105,9 @@ class Coco(torch.utils.data.Dataset):
 
             img = transform_image(img)
 
-            cr_dims = [None, 1.]
-
             for c in range(FLAGS.num_crops):
-                cr,_ = random_crop(img, crop_dims=cr_dims[c])
-                lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest')[0].to(torch.long)
+                cr = random_crop(img, crop_dims=crop_dims[c])
+                lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
                 img_batch[c].append(color_normalize(self.color_jitter(cr)))
                 label_batch[c].append(lab_crop)
 

@@ -18,6 +18,12 @@ FLAGS = flags.FLAGS
 color = np.random.randint(0,256,[255,3],dtype=np.uint8)
 
 
+def evaluate_accuracy(masks, labels):
+    labels = F.one_hot(labels, FLAGS.num_output_classes).float()
+    for b_ix in range(FLAGS.batch_size):
+
+
+
 def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
     for t, m, s in zip(x, mean, std):
         t.sub_(m)
@@ -40,28 +46,15 @@ def transform_image(img):
     return img
 
 def random_crop(image, crop_dims=None, min_crop=0.5, inter_mode='bilinear'):
-    '''c, img_h, img_w = image.shape
+    c, img_h, img_w = image.shape
 
-    if crop_dims is None:
-        crop_size = np.random.uniform(min_crop,min(img_h/img_w,img_w/img_h))
-        crop_size = int(min(img_h,img_w)*crop_size)
-        crop_x,crop_y = np.random.randint(0,img_w-crop_size), np.random.randint(0,img_h-crop_size)
-    else:
-        crop_size = int(max(img_h,img_w)*crop_dims[2])
-        crop_x, crop_y = int(crop_dims[0]*img_w), int(crop_dims[1]*img_h)
-        crop_x = crop_x - crop_x % 12
-        crop_y = crop_y - crop_y % 12
-        crop_size = 336'''
-
-    if crop_dims is None:
-        #crop = image[:,crop_y:crop_y+crop_size, crop_x:crop_x+crop_size]
-        crop = image[:,0:224,0:224]
-    else:
-        crop = image[:,1:225,1:225]
+    crop_size = int(max(img_h,img_w)*crop_dims[2])
+    crop_x, crop_y = int(crop_dims[0]*img_w), int(crop_dims[1]*img_h)
+    crop = image[:, crop_y:crop_y+crop_size, crop_x:crop_x+crop_size]
 
     resized = F.interpolate(crop.unsqueeze(0),size=FLAGS.image_size,mode=inter_mode)
 
-    return resized, None
+    return resized
 
 
 def vic_reg(x):

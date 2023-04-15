@@ -42,9 +42,6 @@ flags.DEFINE_float('alpha',0.5,'')
 flags.DEFINE_float('gamma',0.,'')
 flags.DEFINE_float('mean_max_sub', 0.5, '')
 
-flags.DEFINE_float('min_pos_pixels',0.02,'')
-flags.DEFINE_float('max_pos_pixels',0.3,'')
-
 flags.DEFINE_integer('num_output_classes', 28, '')
 flags.DEFINE_float('student_temp',0.2,'')
 flags.DEFINE_float('teacher_temp', 0.03, '')
@@ -121,7 +118,7 @@ def main(argv):
 
     train_iter = 0
     torch.autograd.set_detect_anomaly(True)
-    for epoch in range(10):
+    for epoch in range(1):
         for data in training_generator:
             optimizer.zero_grad()
 
