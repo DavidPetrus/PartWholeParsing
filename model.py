@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import timm
 
 import dino.vision_transformer as vits
 from utils import find_clusters
@@ -15,43 +16,43 @@ class ImageParser(nn.Module):
     def __init__(self, arch):
         super(ImageParser, self).__init__()
 
-        self.model = vits.__dict__[arch](
-            patch_size=8,
-            num_classes=0)
-        for p in self.model.parameters():
-            p.requires_grad = False
-        self.model.eval().cuda()
-        self.dropout = nn.Dropout2d(p=.1)
+        if FLAGS.use_dino:
+            self.model = vits.__dict__[arch](
+                patch_size=8,
+                num_classes=0)
+            for p in self.model.parameters():
+                p.requires_grad = False
+            self.model.eval().cuda()
+            self.dropout = nn.Dropout2d(p=.1)
 
-        if arch == "vit_small":
-            url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
-        elif arch == "vit_base":
-            url = "dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+            if arch == "vit_small":
+                url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
+            elif arch == "vit_base":
+                url = "dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
 
-        state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
-        self.model.load_state_dict(state_dict, strict=True)
+            state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
+            self.model.load_state_dict(state_dict, strict=True)
+        else:
+            self.model = timm.create_model('resnest26d', features_only=True, pretrained=False, out_indices=(2,)).to('cuda')
+            self.proj = nn.Conv2d(512, FLAGS.embd_dim, kernel_size=1).to('cuda')
 
         if FLAGS.feed_labels:
             self.lab_net = nn.Linear(FLAGS.num_output_classes+FLAGS.embd_dim, FLAGS.embd_dim).to('cuda')
 
         seg_layers = []
-        if not FLAGS.mlp_only:
-            for l in range(FLAGS.depth):
-                seg_layers.append(AttnBlock(
-                        dim=FLAGS.embd_dim,
-                        num_heads=6,
-                        mlp_ratio=2,
-                        drop=0,
-                        attn_drop=0,
-                        drop_path=0))
-
-        else:
-            seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
-            seg_layers.append(nn.ReLU())
+        for l in range(FLAGS.depth):
+            seg_layers.append(AttnBlock(
+                    dim=FLAGS.embd_dim,
+                    num_heads=6,
+                    mlp_ratio=2,
+                    drop=0,
+                    attn_drop=0,
+                    drop_path=0))
             
         seg_layers.append(nn.Linear(FLAGS.embd_dim, FLAGS.embd_dim))
 
         self.seg_layers = nn.Sequential(*seg_layers).to('cuda')
+
 
         self.class_pred = nn.Linear(FLAGS.embd_dim, FLAGS.num_output_classes).to('cuda')
 
@@ -59,16 +60,20 @@ class ImageParser(nn.Module):
 
     def forward(self, x, labels=None):
         self.model.eval()
-        with torch.no_grad():
+        with torch.set_grad_enabled(not FLAGS.use_dino):
             # get dino activations
             dino_feat = self.model(x)
+            if not FLAGS.use_dino:
+                dino_feat = self.proj(dino_feat[0]).reshape(FLAGS.batch_size, FLAGS.embd_dim, -1).movedim(1,2)
 
         if FLAGS.feed_labels:
             labels = F.interpolate(labels.unsqueeze(1).float(), size=28, mode='nearest').reshape(FLAGS.batch_size,-1).long()
             dino_feat = self.lab_net(torch.cat([dino_feat[:,1:], F.one_hot(labels,FLAGS.num_output_classes).float()], dim=-1))
             feat = self.seg_layers(dino_feat)
         else:
-            feat = self.seg_layers(dino_feat)[:,1:]
+            feat = self.seg_layers(dino_feat)
+            if FLAGS.use_dino:
+                feat = feat[:,1:]
 
         proj_feat = self.proj_head(feat)
 

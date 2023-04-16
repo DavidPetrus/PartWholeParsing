@@ -25,7 +25,7 @@ class CelebA(torch.utils.data.Dataset):
     def __init__(self, image_set):
         super(CelebA, self).__init__()
 
-        self.image_files = glob.glob(f"{FLAGS.data_dir}/CelebA-HQ-img/*")
+        self.image_files = glob.glob(f"{FLAGS.data_dir}/CelebAMask-HQ/CelebA-HQ-img/*")
         if image_set == 'train':
             self.image_files = self.image_files[:-3000]
         else:
@@ -61,8 +61,8 @@ class CelebA(torch.utils.data.Dataset):
             img = transform_image(img)
 
             for c in range(FLAGS.num_crops):
-                cr,_ = random_crop(img, crop_dims=crop_dims[c])
-                #lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest')[0].to(torch.long)
+                cr = random_crop(img, crop_dims=crop_dims[c])
+                #lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
                 img_batch[c].append(color_normalize(self.color_jitter(cr)))
                 #label_batch[c].append(lab_crop)
 
@@ -158,8 +158,8 @@ class Coco(torch.utils.data.Dataset):
             img = transform_image(img)
 
             for c in range(FLAGS.num_crops):
-                cr,_ = random_crop(img, crop_dims=crop_dims[c])
-                lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest')[0].to(torch.long)
+                cr = random_crop(img, crop_dims=crop_dims[c])
+                lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
                 img_batch[c].append(color_normalize(self.color_jitter(cr)))
                 label_batch[c].append(lab_crop)
 
@@ -202,7 +202,7 @@ class ADE20k_2017(torch.utils.data.Dataset):
         img = Image.open(img_file)
         w,h = img.size
 
-        img, crop_dims = random_crop(img)
+        img = random_crop(img)
         img = self.preprocess(img)
         class_mask = torch.from_numpy(class_mask[crop_dims[1]:crop_dims[1]+crop_dims[2],crop_dims[0]:crop_dims[0]+crop_dims[2]])
         #parts_mask = torch.from_numpy(parts_mask[crop_dims[1]:crop_dims[1]+crop_dims[2],crop_dims[0]:crop_dims[0]+crop_dims[2]])
@@ -238,7 +238,7 @@ class ADE_Challenge(torch.utils.data.Dataset):
         img = Image.open(self.image_files[index])
         w,h = img.size
 
-        img, crop_dims = random_crop(img)
+        img = random_crop(img)
         img = self.preprocess(img)
 
         ann = Image.open(self.image_files[index].replace('images','annotations').replace('.jpg','.png')).crop((crop_dims[0],crop_dims[1],crop_dims[0]+crop_dims[2],crop_dims[1]+crop_dims[2]))

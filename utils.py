@@ -44,9 +44,7 @@ def random_crop(image, crop_dims, inter_mode='bilinear'):
 
     crop_size = int(max(img_h,img_w)*crop_dims[2])
     crop_x, crop_y = int(crop_dims[0]*img_w), int(crop_dims[1]*img_h)
-    crop_x = crop_x - crop_x % 12
-    crop_y = crop_y - crop_y % 12
-    crop_size = 336
+    crop = image[:, crop_y: crop_y+crop_size, crop_x: crop_x+crop_size]
 
     resized = F.interpolate(crop.unsqueeze(0),size=FLAGS.image_size,mode=inter_mode)
 
@@ -127,6 +125,15 @@ def display_label(label):
     display[label == FLAGS.num_output_classes-1] = 0
 
     return display
+
+def display_mask(mask):
+    global color
+
+    display = np.zeros([mask.shape[0], mask.shape[1], 3], dtype=np.uint8)
+    for c in range(mask.max()):
+        display[mask == c] = color[c]
+
+    return np.repeat(np.repeat(display, 8, axis=0), 8, axis=1)
 
 def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
     if reconst is not None:
