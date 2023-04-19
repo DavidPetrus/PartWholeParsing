@@ -20,6 +20,67 @@ FLAGS = flags.FLAGS
 def _convert_image_to_rgb(image):
     return image.convert("RGB")
 
+class Cityscapes(torch.utils.data.Dataset):
+    def __init__(self, image_set):
+        super(Cityscapes, self).__init__()
+
+        if image_set == 'train':
+            self.image_files = glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/train/*/*")
+            #                   glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/test/*/*")
+        else:
+            self.image_files = glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/val/*/*")
+
+        self.color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
+
+
+    def __getitem__(self, index):
+
+        img_batch = [[] for c in range(FLAGS.num_crops)]
+        label_batch = [[] for c in range(FLAGS.num_crops)]
+        crop_dims = []
+        for c in range(FLAGS.num_crops):
+            crop_size = np.random.uniform(FLAGS.min_crop, 1.)
+            crop_dims.append([np.random.uniform(0.,1.-crop_size), np.random.uniform(0.,1.-crop_size), crop_size])
+
+        batch_sample = random.sample(self.image_files, FLAGS.batch_size)
+
+        for img_file in batch_sample:
+            img = cv2.imread(img_file)
+            label_file = img_file.replace("leftImg8bit_trainvaltest/leftImg8bit", "gtFine_trainvaltest/gtFine").replace("leftImg8bit", "gtFine_labelIds")
+            label = torch.as_tensor(np.array(Image.open(label_file)), dtype=torch.float32)
+            label -= 7
+            label[label < 0] = -1
+
+            img = img[:,:,::-1]
+            img_h, img_w, _ = img.shape
+
+            # Make image square
+            if img_w > img_h:
+                square_x = np.random.randint(0, img_w-img_h)
+                img = img[:, square_x: square_x+img_h]
+                label = label[:, square_x: square_x+img_h]
+            elif img_h > img_w:
+                square_y = np.random.randint(0, img_h-img_w)
+                img = img[square_y: square_y+img_w, :]
+                label = label[:, square_x: square_x+img_h]
+
+            img = transform_image(img)
+
+            for c in range(FLAGS.num_crops):
+                cr = random_crop(img, crop_dims=crop_dims[c])
+                lab_crop = random_crop(label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
+                img_batch[c].append(color_normalize(self.color_jitter(cr)))
+                label_batch[c].append(lab_crop)
+
+                if lab_crop.max() < 0:
+                    print(img_file)
+
+        return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+
+
+    def __len__(self):
+        return len(self.image_files) // FLAGS.batch_size
+
 
 class CelebA(torch.utils.data.Dataset):
     def __init__(self, image_set):

@@ -15,7 +15,36 @@ from absl import flags
 
 FLAGS = flags.FLAGS
 
-color = np.random.randint(0,256,[255,3],dtype=np.uint8)
+color = np.random.randint(50,256,[255,3],dtype=np.uint8)
+
+
+def calc_mIOU(preds, labels):
+    # preds : bs, nc, h, w
+    # labels: bs, nc, h, w
+
+    #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
+    assert labels.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
+
+    intersection = torch.logical_and(preds.unsqueeze(1), labels.unsqueeze(2)).sum(dim=(-1,-2))
+    union = torch.logical_or(preds.unsqueeze(1), labels.unsqueeze(2)).sum(dim=(-1,-2))
+    iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
+
+    present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
+
+    # Compute maximum IOU per prediction
+    iou_per_prediction, max_idxs = iou.max(dim=2, keepdim=True) # bs, num_preds, 1 (num_output_classes indices)
+    
+    # One_hot each prediction with corresponding (max iou) label
+    max_idxs = F.one_hot(max_idxs.squeeze(), FLAGS.num_output_classes)
+    
+    # Compute total IOU per label (by summing corresponding predictions)
+    iou_product = iou_per_prediction * max_idxs # bs, num_preds, num_output_classes
+    iou_sum_per_label = iou_product.sum(dim=1) # bs, num_output_classes
+
+    # Calculate mIOU for present categories
+    mIOU = (iou_sum_per_label * present_cats.float()).sum(dim=1) / present_cats.float().sum(dim=1) # bs
+
+    return mIOU.mean()
 
 
 def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
@@ -39,16 +68,39 @@ def transform_image(img):
     
     return img
 
+
 def random_crop(image, crop_dims, inter_mode='bilinear'):
     c, img_h, img_w = image.shape
 
-    crop_size = int(max(img_h,img_w)*crop_dims[2])
-    crop_x, crop_y = int(crop_dims[0]*img_w), int(crop_dims[1]*img_h)
+    assert img_h == img_w
+    short_side = min(img_h, img_w)
+    crop_size = int(short_side*crop_dims[2])
+    crop_x, crop_y = int(crop_dims[0]*short_side), int(crop_dims[1]*short_side)
     crop = image[:, crop_y: crop_y+crop_size, crop_x: crop_x+crop_size]
 
     resized = F.interpolate(crop.unsqueeze(0),size=FLAGS.image_size,mode=inter_mode)
 
     return resized
+
+def display_label(label):
+    global color
+
+    display = np.zeros([FLAGS.image_size, FLAGS.image_size, 3], dtype=np.uint8)
+    for c in range(FLAGS.num_output_classes):
+        display[label == c] = color[c]
+
+    display[label == FLAGS.num_output_classes] = 0
+
+    return display
+
+def display_mask(mask):
+    global color
+
+    display = np.zeros([mask.shape[0], mask.shape[1], 3], dtype=np.uint8)
+    for c in range(mask.max()+1):
+        display[mask == c] = color[c]
+
+    return np.repeat(np.repeat(display, 8, axis=0), 8, axis=1)
 
 
 def vic_reg(x):
@@ -114,26 +166,6 @@ def calculate_vars(log_dict, level_embds, pca):
         log_dict['var/comp5_l{}'.format(l_ix+1)] = fitted.explained_variance_[8:].sum()
 
     return log_dict
-
-def display_label(label):
-    global color
-
-    display = np.zeros([FLAGS.image_size, FLAGS.image_size, 3], dtype=np.uint8)
-    for c in range(FLAGS.num_output_classes-1):
-        display[label == c] = color[c]
-
-    display[label == FLAGS.num_output_classes-1] = 0
-
-    return display
-
-def display_mask(mask):
-    global color
-
-    display = np.zeros([mask.shape[0], mask.shape[1], 3], dtype=np.uint8)
-    for c in range(mask.max()):
-        display[mask == c] = color[c]
-
-    return np.repeat(np.repeat(display, 8, axis=0), 8, axis=1)
 
 def display_reconst_img(frame,reconst=None,segs=None,waitkey=False):
     if reconst is not None:
