@@ -37,16 +37,18 @@ class ImageParser(nn.Module):
             self.proj = nn.Conv2d(512, FLAGS.embd_dim, kernel_size=1).to('cuda')
 
         segment_net = []
-        for l in range(FLAGS.depth):
-            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
-            
+        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
+        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
+        segment_net.append(nn.Upsample(scale_factor=2))
+        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2), nn.ReLU()])
+        segment_net.append(nn.Upsample(scale_factor=2))
+        segment_net.extend([nn.Conv2d(FLAGS.embd_dim//2, FLAGS.embd_dim//4, kernel_size=FLAGS.kernel_size, padding='same')])
+
         self.segment_net = nn.Sequential(*segment_net).to('cuda')
-        self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+        self.proj_layer = nn.Conv2d(FLAGS.embd_dim//4, FLAGS.output_dim, kernel_size=1).to('cuda')
 
-        self.fm_size = FLAGS.image_size//8
-
-        self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
-        self.dino_clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+        self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim//4)).to('cuda')
+        #self.dino_clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
 
     def cluster_lookup(self, x, dino_cluster=False):
         normed_clusters = F.normalize(self.dino_clusters, dim=1) if dino_cluster else F.normalize(self.clusters, dim=1)
@@ -60,12 +62,15 @@ class ImageParser(nn.Module):
         return cluster_loss, cluster_probs
     
 
-    def forward(self, x):
+    def forward(self, x, val=False):
         self.model.eval()
         with torch.set_grad_enabled(not FLAGS.use_dino):
             # get dino activations
             dino_feat = self.model(x)
-            dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
+            if val:
+                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, FLAGS.eval_size//8, FLAGS.eval_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
+            else:
+                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
 
         feat = self.segment_net(dino_feat) # bs,c,h,w
         masks = self.proj_layer(feat).movedim(1,3) # bs,h,w,c

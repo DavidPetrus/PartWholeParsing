@@ -27,16 +27,19 @@ class Cityscapes(torch.utils.data.Dataset):
         if image_set == 'train':
             self.image_files = glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/train/*/*")
             #                   glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/test/*/*")
+
+            self.train = True
         else:
             self.image_files = glob.glob(f"{FLAGS.data_dir}/cityscapes/leftImg8bit_trainvaltest/leftImg8bit/val/*/*")
+            self.train = False
 
         self.color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
 
 
     def __getitem__(self, index):
 
-        img_batch = [[] for c in range(FLAGS.num_crops)]
-        label_batch = [[] for c in range(FLAGS.num_crops)]
+        img_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
+        label_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
         crop_dims = []
         for c in range(FLAGS.num_crops):
             crop_size = np.random.uniform(FLAGS.min_crop, 1.)
@@ -62,20 +65,26 @@ class Cityscapes(torch.utils.data.Dataset):
             elif img_h > img_w:
                 square_y = np.random.randint(0, img_h-img_w)
                 img = img[square_y: square_y+img_w, :]
-                label = label[:, square_x: square_x+img_h]
+                label = label[square_y: square_y+img_w, :]
 
             img = transform_image(img)
 
-            for c in range(FLAGS.num_crops):
-                cr = random_crop(img, crop_dims=crop_dims[c])
-                lab_crop = random_crop(label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
-                img_batch[c].append(color_normalize(self.color_jitter(cr)))
-                label_batch[c].append(lab_crop)
+            if self.train:
+                for c in range(FLAGS.num_crops):
+                    cr = random_crop(img, crop_dims=crop_dims[c])
+                    lab_crop = random_crop(label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
+                    img_batch[c].append(color_normalize(self.color_jitter(cr)))
+                    label_batch[c].append(lab_crop)
+            else:
+                img = F.interpolate(img.unsqueeze(0),size=FLAGS.eval_size,mode='bilinear')
+                label = F.interpolate(label.unsqueeze(0).unsqueeze(0),size=FLAGS.eval_size,mode='nearest')
+                img_batch.append(color_normalize(img))
+                label_batch.append(label)
 
-                if lab_crop.max() < 0:
-                    print(img_file)
-
-        return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+        if self.train:
+            return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+        else:
+            return torch.cat(img_batch,dim=0), torch.cat(label_batch,dim=0)
 
 
     def __len__(self):

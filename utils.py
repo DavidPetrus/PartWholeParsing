@@ -23,10 +23,10 @@ def calc_mIOU(preds, labels):
     # labels: bs, nc, h, w
 
     #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
-    assert labels.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
+    #assert labels.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
 
-    intersection = torch.logical_and(preds.unsqueeze(1), labels.unsqueeze(2)).sum(dim=(-1,-2))
-    union = torch.logical_or(preds.unsqueeze(1), labels.unsqueeze(2)).sum(dim=(-1,-2))
+    intersection = torch.logical_and(preds.unsqueeze(2), labels.unsqueeze(1)).sum(dim=(-1,-2))
+    union = torch.logical_or(preds.unsqueeze(2), labels.unsqueeze(1)).sum(dim=(-1,-2))
     iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
 
     present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
@@ -100,7 +100,7 @@ def display_mask(mask):
     for c in range(mask.max()+1):
         display[mask == c] = color[c]
 
-    return np.repeat(np.repeat(display, 8, axis=0), 8, axis=1)
+    return np.repeat(np.repeat(display, FLAGS.output_stride, axis=0), FLAGS.output_stride, axis=1)
 
 
 def vic_reg(x):
