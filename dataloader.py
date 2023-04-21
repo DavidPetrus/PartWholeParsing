@@ -8,6 +8,7 @@ import glob
 import cv2
 import random
 import datetime
+import torchvision
 from torchvision.transforms import Resize, CenterCrop, Compose, ToTensor, PILToTensor, ColorJitter
 
 from utils import random_crop, color_distortion, loadAde20K, color_normalize, transform_image
@@ -84,6 +85,13 @@ class Cityscapes(torch.utils.data.Dataset):
                 for c in range(FLAGS.num_crops):
                     cr = random_crop(img, crop_dims=crop_dims[c])
                     lab_crop = random_crop(label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
+                    if FLAGS.flip_image and np.random.random() > 0.5:
+                        cr = torchvision.transforms.functional.hflip(cr)
+                        lab_crop = torchvision.transforms.functional.hflip(lab_crop)
+                        crop_dims.append(True)
+                    else:
+                        crop_dims.append(False)
+
                     img_batch[c].append(color_normalize(self.color_jitter(cr)))
                     label_batch[c].append(lab_crop)
             else:

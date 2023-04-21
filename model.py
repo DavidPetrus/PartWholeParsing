@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
 from einops import rearrange
 import timm
 
@@ -96,6 +97,11 @@ class ImageParser(nn.Module):
         #sims_a = sims_a.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         #sims_b = sims_b.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         b,fm_size,_,c = sims_a.shape
+        if crop_dims[0][-1] == True:
+            sims_a = cr = torchvision.transforms.functional.hflip(sims_a.movedim(3,1)).movedim(1,3)
+        if crop_dims[1][-1] == True:
+            sims_b = cr = torchvision.transforms.functional.hflip(sims_b.movedim(3,1)).movedim(1,3)
+
         if crop_dims[1][2] > crop_dims[0][2]:
             l_map = sims_b
             s_map = sims_a

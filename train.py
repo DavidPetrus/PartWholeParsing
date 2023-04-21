@@ -49,6 +49,7 @@ flags.DEFINE_integer('output_stride', 2, '')
 flags.DEFINE_bool('student_eval', True, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
+flags.DEFINE_bool('flip_image', True, '')
 
 
 def main(argv):
