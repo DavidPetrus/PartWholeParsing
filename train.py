@@ -46,6 +46,8 @@ flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_integer('output_dim', 64, '')
 flags.DEFINE_integer('output_stride', 2, '')
 
+flags.DEFINE_bool('student_eval', True, '')
+
 flags.DEFINE_float('aug_strength', 0.7, '')
 
 
@@ -131,8 +133,9 @@ def main(argv):
 
     train_iter = 0
     #torch.autograd.set_detect_anomaly(True)
-    for epoch in range(5):
-
+    for epoch in range(10):
+        student.train()
+        teacher.train()
         for data in training_generator:
             optimizer.zero_grad()
 
@@ -187,7 +190,7 @@ def main(argv):
 
                 label = F.interpolate(labels[0], size=FLAGS.image_size//2, mode='nearest').long().squeeze() # bs,h,w
                 cluster_preds = F.upsample(cluster_preds, scale_factor=FLAGS.output_stride/2)
-                dino_preds = F.upsample(dino_preds, scale_factor=FLAGS.output_stride/2)
+                dino_preds = F.upsample(dino_preds, scale_factor=8/2)
                 proj_feat_up = F.upsample(proj_feats_s[0].movedim(3,1), scale_factor=FLAGS.output_stride/2)
 
                 pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
@@ -238,19 +241,26 @@ def main(argv):
         val_iter = 0
         val_clust_miou, val_proj_miou = 0.,0.
         with torch.no_grad():
+            student.eval()
+            teacher.eval()
             for data in validation_generator:
 
                 images, labels = data
                 images = images.to('cuda')
                 labels = labels.to('cuda')
 
-                proj_feat, seg_feat, dino_feat = student(images, val=True)
+                if FLAGS.student_eval:
+                    proj_feat, seg_feat, dino_feat = student(images, val=True)
+                    _, cluster_preds = student.cluster_lookup(seg_feat)
+                else:
+                    proj_feat, seg_feat, dino_feat = teacher(images, val=True)
+                    _, cluster_preds = teacher.cluster_lookup(seg_feat)
 
-                _, cluster_preds = student.cluster_lookup(seg_feat)
+                proj_feat = proj_feat - FLAGS.mean_max_coeff * (proj_feat.mean(dim=1, keepdim=True) + proj_feat.max(dim=1, keepdim=True)[0].max(dim=2, keepdim=True)[0])
 
-                label = F.interpolate(labels[0], size=FLAGS.image_size//2, mode='nearest').long().squeeze() # bs,h,w
+                label = F.interpolate(labels, size=FLAGS.eval_size//2, mode='nearest').long().squeeze() # bs,h,w
                 cluster_preds = F.upsample(cluster_preds, scale_factor=FLAGS.output_stride/2)
-                proj_feat_up = F.upsample(proj_feats_s[0].movedim(3,1), scale_factor=FLAGS.output_stride/2)
+                proj_feat_up = F.upsample(proj_feat.movedim(3,1), scale_factor=FLAGS.output_stride/2)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()

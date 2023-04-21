@@ -83,7 +83,7 @@ class ImageParser(nn.Module):
             # get dino activations
             dino_feat = self.model(x)
             if val:
-                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, FLAGS.eval_size//8, FLAGS.eval_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
+                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size//2, FLAGS.eval_size//8, FLAGS.eval_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
             else:
                 dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
 

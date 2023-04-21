@@ -45,12 +45,23 @@ class Cityscapes(torch.utils.data.Dataset):
             crop_size = np.random.uniform(FLAGS.min_crop, 1.)
             crop_dims.append([np.random.uniform(0.,1.-crop_size), np.random.uniform(0.,1.-crop_size), crop_size])
 
-        batch_sample = random.sample(self.image_files, FLAGS.batch_size)
+        batch_sample = random.sample(self.image_files, FLAGS.batch_size) if self.train else random.sample(self.image_files, FLAGS.batch_size//2)
 
         for img_file in batch_sample:
-            img = cv2.imread(img_file)
-            label_file = img_file.replace("leftImg8bit_trainvaltest/leftImg8bit", "gtFine_trainvaltest/gtFine").replace("leftImg8bit", "gtFine_labelIds")
-            label = torch.as_tensor(np.array(Image.open(label_file)), dtype=torch.float32)
+            while True:
+                try:
+                    img = cv2.imread(img_file)
+                    label_file = img_file.replace("leftImg8bit_trainvaltest/leftImg8bit", "gtFine_trainvaltest/gtFine").replace("leftImg8bit", "gtFine_labelIds")
+                    label = torch.as_tensor(np.array(Image.open(label_file)), dtype=torch.float32)
+                    if img is None: 
+                        raise
+                    break
+                except Exception as e:
+                    print(e)
+                    print('-----------------------', img_file)
+                    idx = np.random.randint(len(self.image_files))
+                    img_file = self.image_files[idx]
+
             label -= 7
             label[label < 0] = -1
 
@@ -59,11 +70,11 @@ class Cityscapes(torch.utils.data.Dataset):
 
             # Make image square
             if img_w > img_h:
-                square_x = np.random.randint(0, img_w-img_h)
+                square_x = np.random.randint(0, img_w-img_h) if self.train else (img_w-img_h)/2
                 img = img[:, square_x: square_x+img_h]
                 label = label[:, square_x: square_x+img_h]
             elif img_h > img_w:
-                square_y = np.random.randint(0, img_h-img_w)
+                square_y = np.random.randint(0, img_h-img_w) if self.train else (img_h-img_w)/2
                 img = img[square_y: square_y+img_w, :]
                 label = label[square_y: square_y+img_w, :]
 
