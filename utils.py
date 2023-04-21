@@ -15,7 +15,7 @@ from absl import flags
 
 FLAGS = flags.FLAGS
 
-color = np.random.randint(50,256,[255,3],dtype=np.uint8)
+color = np.random.randint(0,256,[255,3],dtype=np.uint8)
 
 
 def calc_mIOU(preds, labels):
@@ -100,7 +100,7 @@ def display_mask(mask):
     for c in range(mask.max()+1):
         display[mask == c] = color[c]
 
-    return np.repeat(np.repeat(display, FLAGS.output_stride, axis=0), FLAGS.output_stride, axis=1)
+    return np.repeat(np.repeat(display, 2, axis=0), 2, axis=1)
 
 
 def vic_reg(x):

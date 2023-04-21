@@ -39,16 +39,31 @@ class ImageParser(nn.Module):
         segment_net = []
         segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
         segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
-        segment_net.append(nn.Upsample(scale_factor=2))
-        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2), nn.ReLU()])
-        segment_net.append(nn.Upsample(scale_factor=2))
-        segment_net.extend([nn.Conv2d(FLAGS.embd_dim//2, FLAGS.embd_dim//4, kernel_size=FLAGS.kernel_size, padding='same')])
+        if FLAGS.output_stride == 2:
+            segment_net.append(nn.Upsample(scale_factor=2))
+            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2), nn.ReLU()])
+            segment_net.append(nn.Upsample(scale_factor=2))
+            segment_net.extend([nn.Conv2d(FLAGS.embd_dim//2, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2)])
 
-        self.segment_net = nn.Sequential(*segment_net).to('cuda')
-        self.proj_layer = nn.Conv2d(FLAGS.embd_dim//4, FLAGS.output_dim, kernel_size=1).to('cuda')
+            self.segment_net = nn.Sequential(*segment_net).to('cuda')
+            self.proj_layer = nn.Conv2d(FLAGS.embd_dim//2, FLAGS.output_dim, kernel_size=1).to('cuda')
+            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim//2)).to('cuda')
+        elif FLAGS.output_stride == 4:
+            #segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
+            segment_net.append(nn.Upsample(scale_factor=2))
+            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim)])
 
-        self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim//4)).to('cuda')
-        #self.dino_clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+            self.segment_net = nn.Sequential(*segment_net).to('cuda')
+            self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+        elif FLAGS.output_stride == 8:
+            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim)])
+
+            self.segment_net = nn.Sequential(*segment_net).to('cuda')
+            self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+
+        self.dino_clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
 
     def cluster_lookup(self, x, dino_cluster=False):
         normed_clusters = F.normalize(self.dino_clusters, dim=1) if dino_cluster else F.normalize(self.clusters, dim=1)

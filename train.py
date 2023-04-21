@@ -131,7 +131,7 @@ def main(argv):
 
     train_iter = 0
     #torch.autograd.set_detect_anomaly(True)
-    for epoch in range(10):
+    for epoch in range(5):
 
         for data in training_generator:
             optimizer.zero_grad()
@@ -171,7 +171,7 @@ def main(argv):
 
                     contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=-1).detach())
 
-            #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
+            dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
             loss = cluster_loss + contrastive_loss #+ FLAGS.entropy_reg*entropy_reg
@@ -185,18 +185,21 @@ def main(argv):
                 for param_s, param_t in zip(student.parameters(), teacher.parameters()):
                     param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
 
-                label = F.interpolate(labels[0], size=FLAGS.image_size//FLAGS.output_stride, mode='nearest').long().squeeze() # bs,h,w
+                label = F.interpolate(labels[0], size=FLAGS.image_size//2, mode='nearest').long().squeeze() # bs,h,w
+                cluster_preds = F.upsample(cluster_preds, scale_factor=FLAGS.output_stride/2)
+                dino_preds = F.upsample(dino_preds, scale_factor=FLAGS.output_stride/2)
+                proj_feat_up = F.upsample(proj_feats_s[0].movedim(3,1), scale_factor=FLAGS.output_stride/2)
 
                 pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
-                #dino_acc = (dino_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
+                dino_acc = (dino_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
 
                 acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()
 
                 label[label < 0] = FLAGS.num_output_classes
                 label_one_hot = F.one_hot(label, FLAGS.num_output_classes+1)[:,:,:,:-1].movedim(3,1) # bs,nc,h,w
                 pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
-                #dino_clust_miou = calc_mIOU(F.one_hot(dino_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
-                proj_clust_miou = calc_mIOU(F.one_hot(proj_feats_s[0].argmax(dim=-1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                dino_clust_miou = calc_mIOU(F.one_hot(dino_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
+                proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
                 max_feat = proj_feat_s.argmax(dim=-1)
                 uniq_cat, output_counts = torch.unique(max_feat, return_counts = True)
@@ -214,12 +217,12 @@ def main(argv):
                     img = (255*unnormalize(image_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_crop.png', img)
 
-                    mask = proj_feats_s[0][0].argmax(dim=-1)
+                    mask = proj_feat_up[0].argmax(dim=1)
                     mask_disp = display_mask(mask.cpu().numpy())
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_mask.png', mask_disp)
 
             log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "PredClust Loss": cluster_loss.item(), "PredClust Acc": pred_cluster_acc.item(), \
-                        "Cluster Acc": acc_clust.item(),# "Dino Loss": dino_loss.item(), "Dino Acc": dino_acc.item(), "Dino mIOU": dino_clust_miou.item(),\
+                        "Cluster Acc": acc_clust.item(), "Dino Loss": dino_loss.item(), "Dino Acc": dino_acc.item(), "Dino mIOU": dino_clust_miou.item(),\
                         "Projection mIOU": proj_clust_miou.item(), "Pred Clust mIOU": pred_clust_miou.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
                         "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}
@@ -245,7 +248,9 @@ def main(argv):
 
                 _, cluster_preds = student.cluster_lookup(seg_feat)
 
-                label = F.interpolate(labels, size=FLAGS.eval_size//FLAGS.output_stride, mode='nearest').long().squeeze() # bs,h,w
+                label = F.interpolate(labels[0], size=FLAGS.image_size//2, mode='nearest').long().squeeze() # bs,h,w
+                cluster_preds = F.upsample(cluster_preds, scale_factor=FLAGS.output_stride/2)
+                proj_feat_up = F.upsample(proj_feats_s[0].movedim(3,1), scale_factor=FLAGS.output_stride/2)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()
@@ -253,7 +258,7 @@ def main(argv):
                 label[label < 0] = FLAGS.num_output_classes
                 label_one_hot = F.one_hot(label, FLAGS.num_output_classes+1)[:,:,:,:-1].movedim(3,1) # bs,nc,h,w
                 pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
-                proj_clust_miou = calc_mIOU(F.one_hot(proj_feat.argmax(dim=-1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
                 val_iter += 1
                 val_clust_miou += pred_clust_miou
