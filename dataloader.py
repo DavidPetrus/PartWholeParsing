@@ -45,6 +45,10 @@ class Cityscapes(torch.utils.data.Dataset):
         for c in range(FLAGS.num_crops):
             crop_size = np.random.uniform(FLAGS.min_crop, 1.)
             crop_dims.append([np.random.uniform(0.,1.-crop_size), np.random.uniform(0.,1.-crop_size), crop_size])
+            if FLAGS.flip_image and np.random.random() > 0.5:
+                crop_dims[c].append(True)
+            else:
+                crop_dims[c].append(False)
 
         batch_sample = random.sample(self.image_files, FLAGS.batch_size) if self.train else random.sample(self.image_files, FLAGS.batch_size//2)
 
@@ -71,11 +75,11 @@ class Cityscapes(torch.utils.data.Dataset):
 
             # Make image square
             if img_w > img_h:
-                square_x = np.random.randint(0, img_w-img_h) if self.train else (img_w-img_h)/2
+                square_x = np.random.randint(0, img_w-img_h) if self.train else int((img_w-img_h)/2)
                 img = img[:, square_x: square_x+img_h]
                 label = label[:, square_x: square_x+img_h]
             elif img_h > img_w:
-                square_y = np.random.randint(0, img_h-img_w) if self.train else (img_h-img_w)/2
+                square_y = np.random.randint(0, img_h-img_w) if self.train else int((img_h-img_w)/2)
                 img = img[square_y: square_y+img_w, :]
                 label = label[square_y: square_y+img_w, :]
 
@@ -85,12 +89,9 @@ class Cityscapes(torch.utils.data.Dataset):
                 for c in range(FLAGS.num_crops):
                     cr = random_crop(img, crop_dims=crop_dims[c])
                     lab_crop = random_crop(label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
-                    if FLAGS.flip_image and np.random.random() > 0.5:
+                    if crop_dims[c][3] == True:
                         cr = torchvision.transforms.functional.hflip(cr)
                         lab_crop = torchvision.transforms.functional.hflip(lab_crop)
-                        crop_dims.append(True)
-                    else:
-                        crop_dims.append(False)
 
                     img_batch[c].append(color_normalize(self.color_jitter(cr)))
                     label_batch[c].append(lab_crop)

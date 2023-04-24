@@ -18,15 +18,15 @@ FLAGS = flags.FLAGS
 color = np.random.randint(0,256,[255,3],dtype=np.uint8)
 
 
-def calc_mIOU(preds, labels):
+def calc_mIOU(preds, targets):
     # preds : bs, nc, h, w
-    # labels: bs, nc, h, w
+    # targets: bs, nc, h, w
 
     #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
-    #assert labels.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
+    #assert targets.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
 
-    intersection = torch.logical_and(preds.unsqueeze(2), labels.unsqueeze(1)).sum(dim=(-1,-2))
-    union = torch.logical_or(preds.unsqueeze(2), labels.unsqueeze(1)).sum(dim=(-1,-2))
+    intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
+    union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
     iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
 
     present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
@@ -46,6 +46,16 @@ def calc_mIOU(preds, labels):
 
     return mIOU.mean()
 
+def assignMaxIOU(preds, targets):
+    with torch.no_grad():
+        intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
+        union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
+        iou = intersection / (union + 0.001) # bs, student_preds, teacher_preds
+
+        max_ious, max_idxs = iou.max(dim=1) # bs, teacher_preds
+        max_targets = torch.gather(targets, 1, torch.tile(max_idxs.unsqueeze(-1).unsqueeze(-1), (1,1,targets.shape[2],targets.shape[3])))
+
+        return max_targets
 
 def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
     for t, m, s in zip(x, mean, std):

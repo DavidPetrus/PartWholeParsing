@@ -47,7 +47,7 @@ class ImageParser(nn.Module):
             segment_net.extend([nn.Conv2d(FLAGS.embd_dim//2, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2)])
 
             self.segment_net = nn.Sequential(*segment_net).to('cuda')
-            self.proj_layer = nn.Conv2d(FLAGS.embd_dim//2, FLAGS.output_dim, kernel_size=1).to('cuda')
+            self.proj_layer = nn.Conv2d(FLAGS.embd_dim//2, FLAGS.num_heads*FLAGS.output_dim, kernel_size=1).to('cuda')
             self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim//2)).to('cuda')
         elif FLAGS.output_stride == 4:
             #segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
@@ -97,9 +97,9 @@ class ImageParser(nn.Module):
         #sims_a = sims_a.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         #sims_b = sims_b.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         b,fm_size,_,c = sims_a.shape
-        if crop_dims[0][-1] == True:
+        if crop_dims[0][3] == True:
             sims_a = cr = torchvision.transforms.functional.hflip(sims_a.movedim(3,1)).movedim(1,3)
-        if crop_dims[1][-1] == True:
+        if crop_dims[1][3] == True:
             sims_b = cr = torchvision.transforms.functional.hflip(sims_b.movedim(3,1)).movedim(1,3)
 
         if crop_dims[1][2] > crop_dims[0][2]:
