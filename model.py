@@ -3,9 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from einops import rearrange
-import timm
+from torchvision.models.feature_extraction import create_feature_extractor
 
-import dino.vision_transformer as vits
 from utils import find_clusters
 
 from absl import flags
@@ -17,54 +16,28 @@ class ImageParser(nn.Module):
     def __init__(self, arch):
         super(ImageParser, self).__init__()
 
-        if FLAGS.use_dino:
-            self.model = vits.__dict__[arch](
-                patch_size=8,
-                num_classes=0)
-            for p in self.model.parameters():
-                p.requires_grad = False
-            self.model.eval().cuda()
-            self.dropout = nn.Dropout2d(p=.1)
+        self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').to('cuda')
+        dino_resnet = torch.hub.load('facebookresearch/dino:main', 'dino_resnet50')
+        return_nodes = {
+            'layer1.2.add': 'layer1',
+            'layer2.3.add': 'layer2',
+        }
+        self.dino_resnet = create_feature_extractor(dino_resnet, return_nodes=return_nodes).to('cuda')
 
-            if arch == "vit_small":
-                url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
-            elif arch == "vit_base":
-                url = "dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+        self.conv_x14 = nn.Sequential(
+            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=1.75, mode='bilinear'),
+            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same')
+        ).to('cuda')
+        self.conv_x8 = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, padding='same'), nn.BatchNorm2d(256), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(256, FLAGS.embd_dim, kernel_size=3, padding='same')
+        ).to('cuda')
+        self.conv_x4 = nn.Conv2d(256, FLAGS.embd_dim, kernel_size=3, padding='same').to('cuda')
 
-            state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
-            self.model.load_state_dict(state_dict, strict=True)
-        else:
-            self.model = timm.create_model('resnest26d', features_only=True, pretrained=False, out_indices=(2,)).to('cuda')
-            self.proj = nn.Conv2d(512, FLAGS.embd_dim, kernel_size=1).to('cuda')
-
-        segment_net = []
-        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
-        segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
-        if FLAGS.output_stride == 2:
-            segment_net.append(nn.Upsample(scale_factor=2))
-            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2), nn.ReLU()])
-            segment_net.append(nn.Upsample(scale_factor=2))
-            segment_net.extend([nn.Conv2d(FLAGS.embd_dim//2, FLAGS.embd_dim//2, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim//2)])
-
-            self.segment_net = nn.Sequential(*segment_net).to('cuda')
-            self.proj_layer = nn.Conv2d(FLAGS.embd_dim//2, FLAGS.num_heads*FLAGS.output_dim, kernel_size=1).to('cuda')
-            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim//2)).to('cuda')
-        elif FLAGS.output_stride == 4:
-            #segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim), nn.ReLU()])
-            segment_net.append(nn.Upsample(scale_factor=2))
-            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim)])
-
-            self.segment_net = nn.Sequential(*segment_net).to('cuda')
-            self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
-            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
-        elif FLAGS.output_stride == 8:
-            segment_net.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=FLAGS.kernel_size, padding='same'), nn.BatchNorm2d(FLAGS.embd_dim)])
-
-            self.segment_net = nn.Sequential(*segment_net).to('cuda')
-            self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
-            self.clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
-
-        self.dino_clusters = torch.nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+        self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+        self.clusters = nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
+        self.dino_clusters = nn.Parameter(torch.randn(FLAGS.num_output_classes, 384)).to('cuda')
 
     def cluster_lookup(self, x, dino_cluster=False):
         normed_clusters = F.normalize(self.dino_clusters, dim=1) if dino_cluster else F.normalize(self.clusters, dim=1)
@@ -79,28 +52,31 @@ class ImageParser(nn.Module):
     
 
     def forward(self, x, val=False):
-        self.model.eval()
-        with torch.set_grad_enabled(not FLAGS.use_dino):
+        bs = FLAGS.miou_bs if val else FLAGS.batch_size
+        v2_fm_size = FLAGS.eval_size//14 if val else FLAGS.image_size//14
+        with torch.set_grad_enabled(FLAGS.train_dinov2):
             # get dino activations
-            dino_feat = self.model(x)
-            if val:
-                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size//2, FLAGS.eval_size//8, FLAGS.eval_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
-            else:
-                dino_feat = dino_feat[:,1:].reshape(FLAGS.batch_size, FLAGS.image_size//8, FLAGS.image_size//8, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
+            res = self.dinov2(x, is_training=True)
+            feats_s14 = res['x_prenorm'][:,1:].reshape(bs, v2_fm_size, v2_fm_size, 384).movedim(3,1) # bs,c,h,w
 
-        feat = self.segment_net(dino_feat) # bs,c,h,w
-        masks = self.proj_layer(feat).movedim(1,3) # bs,h,w,c
+        with torch.set_grad_enabled(FLAGS.train_dino_resnet):
+            ret_dict = self.dino_resnet(x)
+            feats_s4 = ret_dict['layer1']
+            feats_s8 = ret_dict['layer2']
 
-        return masks, feat, dino_feat
+        out_features = self.conv_x14(feats_s14) + self.conv_x8(feats_s8) + self.conv_x4(feats_s4)
+        masks = self.proj_layer(out_features).movedim(1,3) # bs,h,w,c
+
+        return masks, out_features, feats_s14
 
     def match_crops(self, sims_a, sims_b, crop_dims):
         #sims_a = sims_a.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         #sims_b = sims_b.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
         b,fm_size,_,c = sims_a.shape
         if crop_dims[0][3] == True:
-            sims_a = cr = torchvision.transforms.functional.hflip(sims_a.movedim(3,1)).movedim(1,3)
+            sims_a = torchvision.transforms.functional.hflip(sims_a.movedim(3,1)).movedim(1,3)
         if crop_dims[1][3] == True:
-            sims_b = cr = torchvision.transforms.functional.hflip(sims_b.movedim(3,1)).movedim(1,3)
+            sims_b = torchvision.transforms.functional.hflip(sims_b.movedim(3,1)).movedim(1,3)
 
         if crop_dims[1][2] > crop_dims[0][2]:
             l_map = sims_b

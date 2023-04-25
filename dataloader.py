@@ -50,7 +50,7 @@ class Cityscapes(torch.utils.data.Dataset):
             else:
                 crop_dims[c].append(False)
 
-        batch_sample = random.sample(self.image_files, FLAGS.batch_size) if self.train else random.sample(self.image_files, FLAGS.batch_size//2)
+        batch_sample = random.sample(self.image_files, FLAGS.batch_size) if self.train else random.sample(self.image_files, FLAGS.miou_bs)
 
         for img_file in batch_sample:
             while True:
@@ -108,7 +108,10 @@ class Cityscapes(torch.utils.data.Dataset):
 
 
     def __len__(self):
-        return len(self.image_files) // FLAGS.batch_size
+        if self.train:
+            return len(self.image_files) // FLAGS.batch_size
+        else:
+            return len(self.image_files) // FLAGS.miou_bs
 
 
 class CelebA(torch.utils.data.Dataset):
