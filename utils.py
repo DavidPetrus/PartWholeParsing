@@ -80,11 +80,11 @@ def transform_image(img):
 
 def normalize_feature_maps(fm):
     if FLAGS.norm_type == 'mean_max':
-        return fm - (1 - FLAGS.mean_max_coeff) * fm.mean(dim=(1,2), keepdim=True) - FLAGS.mean_max_coeff * fm.max(dim=1, keepdim=True)[0].max(dim=2, keepdim=True)[0]
+        return fm - (1 - FLAGS.mean_max_coeff) * fm.mean(dim=(2,3), keepdim=True) - FLAGS.mean_max_coeff * fm.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
     elif FLAGS.norm_type == 'mean_std':
-        return fm - fm.mean(dim=(1,2), keepdim=True) - fm.std(dim=(1,2), keepdim=True)
+        return fm - fm.mean(dim=(2,3), keepdim=True) - fm.std(dim=(2,3), keepdim=True)
     elif FLAGS.norm_type == 'mean':
-        return fm - fm.mean(dim=(1,2), keepdim=True)
+        return fm - fm.mean(dim=(2,3), keepdim=True)
 
 
 def random_crop(image, crop_dims, inter_mode='bilinear'):

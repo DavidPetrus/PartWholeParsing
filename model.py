@@ -70,18 +70,18 @@ class ImageParser(nn.Module):
             feats_s8 = ret_dict['layer2']
 
         out_features = self.conv_x14(feats_s14) + self.conv_x8(feats_s8) + self.conv_x4(feats_s4)
-        masks = self.proj_layer(out_features).movedim(1,3) # bs,h,w,c
+        masks = self.proj_layer(out_features) # bs,c,h,w
 
         return masks, out_features, feats_s14
 
     def match_crops(self, sims_a, sims_b, crop_dims):
-        #sims_a = sims_a.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
-        #sims_b = sims_b.reshape(FLAGS.batch_size, self.fm_size, self.fm_size, FLAGS.output_dim)
-        b,fm_size,_,c = sims_a.shape
+        #sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.output_dim, self.fm_size, self.fm_size)
+        #sims_b = sims_b.reshape(FLAGS.batch_size, FLAGS.output_dim, self.fm_size, self.fm_size)
+        b,c,fm_size,_ = sims_a.shape
         if crop_dims[0][3] == True:
-            sims_a = torchvision.transforms.functional.hflip(sims_a.movedim(3,1)).movedim(1,3)
+            sims_a = torchvision.transforms.functional.hflip(sims_a)
         if crop_dims[1][3] == True:
-            sims_b = torchvision.transforms.functional.hflip(sims_b.movedim(3,1)).movedim(1,3)
+            sims_b = torchvision.transforms.functional.hflip(sims_b)
 
         if crop_dims[1][2] > crop_dims[0][2]:
             l_map = sims_b
@@ -104,19 +104,19 @@ class ImageParser(nn.Module):
                         min(s_dims[0]+s_dims[2], l_dims[0]+l_dims[2]), \
                         min(s_dims[1]+s_dims[2], l_dims[1]+l_dims[2]))
 
-        fm_l_crop = l_map[:, \
+        fm_l_crop = l_map[:,:, \
                     round((overlap_dims[1] - l_dims[1]) * fm_scale_l): \
                     round((overlap_dims[3] - l_dims[1]) * fm_scale_l), \
                     round((overlap_dims[0] - l_dims[0]) * fm_scale_l): \
-                    round((overlap_dims[2] - l_dims[0]) * fm_scale_l)] # B,fm_a_h,fm_a_w,c
+                    round((overlap_dims[2] - l_dims[0]) * fm_scale_l)] # B,c,fm_a_h,fm_a_w
 
-        fm_s_crop = s_map[:, \
+        fm_s_crop = s_map[:,:, \
                     round((overlap_dims[1] - s_dims[1]) * fm_scale_s): \
                     round((overlap_dims[3] - s_dims[1]) * fm_scale_s), \
                     round((overlap_dims[0] - s_dims[0]) * fm_scale_s): \
-                    round((overlap_dims[2] - s_dims[0]) * fm_scale_s)] # B,fm_b_h,fm_b_w,c
+                    round((overlap_dims[2] - s_dims[0]) * fm_scale_s)] # B,c,fm_b_h,fm_b_w
         
-        fm_s_crop = F.interpolate(fm_s_crop.movedim(3,1), size=(fm_l_crop.shape[1], fm_l_crop.shape[2]), mode='bilinear', align_corners=False).movedim(1,3)
+        fm_s_crop = F.interpolate(fm_s_crop, size=(fm_l_crop.shape[2], fm_l_crop.shape[3]), mode='bilinear', align_corners=False)
 
         if crop_dims[1][2] > crop_dims[0][2]:
             return fm_s_crop, fm_l_crop
