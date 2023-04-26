@@ -3,7 +3,7 @@ import cv2
 import torch
 import torch.nn.functional as F
 import random
-torch.manual_seed(88)
+torch.manual_seed(99)
 np.random.seed(23)
 random.seed(36)
 #from torchvision import ColorJitter
@@ -28,7 +28,7 @@ flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_bool('train_dinov2', False, '')
-flags.DEFINE_bool('train_dino_resnet', True, '')
+flags.DEFINE_bool('train_dino_resnet', False, '')
 flags.DEFINE_integer('batch_size',32,'')
 flags.DEFINE_float('lr',0.0003,'')
 flags.DEFINE_integer('num_workers',8,'')
@@ -40,20 +40,21 @@ flags.DEFINE_float('teacher_momentum', 0.995, '')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.5, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
-flags.DEFINE_integer('miou_bs',2,'')
+flags.DEFINE_integer('miou_bs',4,'')
 
 flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
 flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
 flags.DEFINE_integer('kernel_size', 3, '')
-flags.DEFINE_integer('embd_dim', 256, '')
+flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_integer('output_dim', 64, '')
 
 flags.DEFINE_bool('student_eval', False, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 flags.DEFINE_bool('flip_image', True, '')
+flags.DEFINE_integer('num_epochs', 30)
 
 
 def main(argv):
@@ -138,7 +139,7 @@ def main(argv):
 
     train_iter = 0
     #torch.autograd.set_detect_anomaly(True)
-    for epoch in range(20):
+    for epoch in range(FLAGS.num_epochs):
 
         val_iter = 0
         val_clust_miou, val_proj_miou = 0.,0.
@@ -160,9 +161,9 @@ def main(argv):
 
                 proj_feat = normalize_feature_maps(proj_feat)
 
-                label = labels[:1].long().squeeze(1)
-                cluster_preds = F.upsample(cluster_preds[:1], scale_factor=4)
-                proj_feat_up = F.upsample(proj_feat[:1].movedim(3,1), scale_factor=4)
+                label = labels[:FLAGS.miou_bs].long().squeeze(1)
+                cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
+                proj_feat_up = F.upsample(proj_feat[:FLAGS.miou_bs].movedim(3,1), scale_factor=4)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()
@@ -197,15 +198,8 @@ def main(argv):
                 proj_feat_s, seg_feat, dino_feat = student(image_crops[c])
                 proj_feat_t, _, _ = teacher(image_crops[c])
 
-                if FLAGS.norm_type == 'mean_max':
-                    proj_feat_s = normalize_feature_maps(proj_feat_s)
-                    proj_feat_t = normalize_feature_maps(proj_feat_t)
-                elif FLAGS.norm_type == 'mean_std':
-                    proj_feat_s = proj_feat_s - proj_feat_s.mean(dim=(1,2), keepdim=True) - proj_feat_s.std(dim=(1,2), keepdim=True)
-                    proj_feat_t = proj_feat_t - proj_feat_t.mean(dim=(1,2), keepdim=True) - proj_feat_t.std(dim=(1,2), keepdim=True)
-                elif FLAGS.norm_type == 'mean':
-                    proj_feat_s = proj_feat_s - proj_feat_s.mean(dim=(1,2), keepdim=True)
-                    proj_feat_t = proj_feat_t - proj_feat_t.mean(dim=(1,2), keepdim=True)
+                proj_feat_s = normalize_feature_maps(proj_feat_s)
+                proj_feat_t = normalize_feature_maps(proj_feat_t)
 
                 proj_feats_s.append(proj_feat_s) # bs,h,w,no
                 proj_feats_t.append(proj_feat_t) # bs,h,w,no

@@ -79,8 +79,12 @@ def transform_image(img):
     return img
 
 def normalize_feature_maps(fm):
-    
-    return fm - FLAGS.mean_max_coeff * (fm.mean(dim=(1,2), keepdim=True) + fm.max(dim=1, keepdim=True)[0].max(dim=2, keepdim=True)[0])
+    if FLAGS.norm_type == 'mean_max':
+        return fm - (1 - FLAGS.mean_max_coeff) * fm.mean(dim=(1,2), keepdim=True) - FLAGS.mean_max_coeff * fm.max(dim=1, keepdim=True)[0].max(dim=2, keepdim=True)[0]
+    elif FLAGS.norm_type == 'mean_std':
+        return fm - fm.mean(dim=(1,2), keepdim=True) - fm.std(dim=(1,2), keepdim=True)
+    elif FLAGS.norm_type == 'mean':
+        return fm - fm.mean(dim=(1,2), keepdim=True)
 
 
 def random_crop(image, crop_dims, inter_mode='bilinear'):

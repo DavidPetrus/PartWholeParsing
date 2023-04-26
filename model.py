@@ -27,13 +27,18 @@ class ImageParser(nn.Module):
         self.conv_x14 = nn.Sequential(
             nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=1.75, mode='bilinear'),
             nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
-            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same')
+            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
         ).to('cuda')
         self.conv_x8 = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding='same'), nn.BatchNorm2d(256), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
-            nn.Conv2d(256, FLAGS.embd_dim, kernel_size=3, padding='same')
+            nn.Conv2d(512, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
+            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
         ).to('cuda')
-        self.conv_x4 = nn.Conv2d(256, FLAGS.embd_dim, kernel_size=3, padding='same').to('cuda')
+        self.conv_x4 = nn.Sequential(
+            nn.Conv2d(256, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
+            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
+            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
+        ).to('cuda')
 
         self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
         self.clusters = nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
