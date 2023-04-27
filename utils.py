@@ -85,6 +85,8 @@ def normalize_feature_maps(fm):
         return fm - fm.mean(dim=(2,3), keepdim=True) - fm.std(dim=(2,3), keepdim=True)
     elif FLAGS.norm_type == 'mean':
         return fm - fm.mean(dim=(2,3), keepdim=True)
+    elif FLAGS.norm_type == 'layer_norm':
+        return (fm - fm.mean(dim=(2,3), keepdim=True)) / fm.std(dim=(2,3), keepdim=True)
 
 
 def random_crop(image, crop_dims, inter_mode='bilinear'):

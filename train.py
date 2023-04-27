@@ -40,7 +40,7 @@ flags.DEFINE_float('teacher_momentum', 0.995, '')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.5, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
-flags.DEFINE_integer('miou_bs',2,'')
+flags.DEFINE_integer('miou_bs',1,'')
 
 flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
@@ -48,13 +48,13 @@ flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
-flags.DEFINE_integer('output_dim', 64, '')
+flags.DEFINE_integer('output_dim', 48, '')
 
 flags.DEFINE_bool('student_eval', False, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 flags.DEFINE_bool('flip_image', True, '')
-flags.DEFINE_integer('num_epochs', 30, '')
+flags.DEFINE_integer('num_epochs', 20, '')
 
 
 def main(argv):
@@ -201,8 +201,8 @@ def main(argv):
                 proj_feat_s = normalize_feature_maps(proj_feat_s)
                 proj_feat_t = normalize_feature_maps(proj_feat_t)
 
-                proj_feats_s.append(proj_feat_s) # bs,h,w,no
-                proj_feats_t.append(proj_feat_t) # bs,h,w,no
+                proj_feats_s.append(proj_feat_s) # bs,no,h,w
+                proj_feats_t.append(proj_feat_t) # bs,no,h,w
                 seg_feats.append(seg_feat) # bs,c,h,w
                 dino_feats.append(dino_feat) # bs,c,h,w
 
@@ -249,7 +249,7 @@ def main(argv):
 
                 # Compute mIOU between predictions and labels
                 #label = F.interpolate(labels[0], size=FLAGS.image_size//2, mode='nearest').long().squeeze() # bs,h,w
-                label = labels[0][:FLAGS.miou_bs].long().squeeze()
+                label = labels[0][:FLAGS.miou_bs].long().squeeze(1)
                 label[label < 0] = FLAGS.num_output_classes
                 cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
                 dino_preds = F.upsample(dino_preds[:FLAGS.miou_bs], scale_factor=14)
@@ -267,7 +267,7 @@ def main(argv):
                 uniq_cat, output_counts = torch.unique(max_feat, return_counts = True)
                 most_freq_frac = output_counts.max() / output_counts.sum()
 
-                max_feat_img = proj_feat_s[0].argmax(dim=1)
+                max_feat_img = proj_feat_s[0].argmax(dim=0)
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
