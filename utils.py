@@ -46,6 +46,27 @@ def calc_mIOU(preds, targets):
 
     return mIOU.mean()
 
+def hungarian_mIOU(preds, targets):
+    # preds : bs, nc, h, w
+    # targets: bs, nc, h, w
+
+    #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
+    #assert targets.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
+
+    intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
+    union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
+    iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
+
+    present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
+
+    # Compute maximum IOU per prediction
+    iou_per_cat, max_idxs = iou.max(dim=1) # bs, num_output_classes
+
+    # Calculate mIOU for present categories
+    mIOU = (iou_per_cat * present_cats.float()).sum(dim=1) / present_cats.float().sum(dim=1) # bs
+
+    return mIOU.mean()
+
 def assignMaxIOU(preds, targets):
     with torch.no_grad():
         intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))

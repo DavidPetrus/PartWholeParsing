@@ -16,7 +16,7 @@ import os
 
 from dataloader import ADE20k_2017, ADE_Challenge, Coco, CelebA, Cityscapes
 from model import ImageParser
-from utils import unnormalize, display_label, display_mask, calc_mIOU, normalize_feature_maps
+from utils import unnormalize, display_label, display_mask, calc_mIOU, normalize_feature_maps, hungarian_mIOU
 import wandb
 
 from absl import flags, app
@@ -154,15 +154,15 @@ def main(argv):
 
                 if FLAGS.student_eval:
                     proj_feat, seg_feat, dino_feat = student(images, val=True)
-                    _, cluster_preds = student.cluster_lookup(seg_feat)
+                    #_, cluster_preds = student.cluster_lookup(seg_feat)
                 else:
                     proj_feat, seg_feat, dino_feat = teacher(images, val=True)
-                    _, cluster_preds = teacher.cluster_lookup(seg_feat)
+                    #_, cluster_preds = teacher.cluster_lookup(seg_feat)
 
                 proj_feat = normalize_feature_maps(proj_feat)
 
                 label = labels[:FLAGS.miou_bs].long().squeeze(1)
-                cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
+                #cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
                 proj_feat_up = F.upsample(proj_feat[:FLAGS.miou_bs], scale_factor=4)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
@@ -170,14 +170,17 @@ def main(argv):
 
                 label[label < 0] = FLAGS.num_output_classes
                 label_one_hot = F.one_hot(label, FLAGS.num_output_classes+1)[:,:,:,:-1].movedim(3,1) # bs,nc,h,w
-                pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
+                #pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
+                hungarian_mIOU = hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                
+
                 val_iter += 1
-                val_clust_miou += pred_clust_miou
+                val_clust_miou += hungarian_mIOU
                 val_proj_miou += proj_clust_miou
 
-            log_dict = {"Epoch": epoch, "Val Cluster mIOU": val_clust_miou/val_iter, "Val Proj mIOU": val_proj_miou/val_iter}
+            log_dict = {"Epoch": epoch, "Val Hungarian mIOU": val_clust_miou/val_iter, "Val Proj mIOU": val_proj_miou/val_iter}
             print(log_dict)
 
             wandb.log(log_dict)
@@ -259,9 +262,10 @@ def main(argv):
                 dino_acc = (dino_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
 
                 label_one_hot = F.one_hot(label, FLAGS.num_output_classes+1)[:,:,:,:-1].movedim(3,1) # bs,nc,h,w
-                pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
-                dino_clust_miou = calc_mIOU(F.one_hot(dino_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
+                #pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
+                #dino_clust_miou = calc_mIOU(F.one_hot(dino_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                hungarian_mIOU = hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
                 max_feat = proj_feat_s.argmax(dim=1)
                 uniq_cat, output_counts = torch.unique(max_feat, return_counts = True)
@@ -284,8 +288,8 @@ def main(argv):
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_mask.png', mask_disp)
 
             log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "PredClust Loss": cluster_loss.item(), "PredClust Acc": pred_cluster_acc.item(), \
-                        "Cluster Acc": acc_clust.item(), "Dino Loss": dino_loss.item(), "Dino Acc": dino_acc.item(), "Dino mIOU": dino_clust_miou.item(),\
-                        "Projection mIOU": proj_clust_miou.item(), "Pred Clust mIOU": pred_clust_miou.item(), "Contrastive_mIOU": cluster_mIOU.item(), \
+                        "Cluster Acc": acc_clust.item(), "Dino Loss": dino_loss.item(), "Dino Acc": dino_acc.item(), \
+                        "Projection mIOU": proj_clust_miou.item(), "Contrastive_mIOU": cluster_mIOU.item(), "hungarian_mIOU": hungarian_mIOU.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
                         "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}
             
