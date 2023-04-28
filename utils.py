@@ -10,6 +10,7 @@ import os
 import json
 from PIL import Image
 import math
+from scipy.optimize import linear_sum_assignment
 
 from absl import flags
 
@@ -29,7 +30,7 @@ def calc_mIOU(preds, targets):
     union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
     iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
 
-    present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
+    present_cats = targets.sum(dim=(2,3)) > 0 # bs, num_output_classes
 
     # Compute maximum IOU per prediction
     iou_per_prediction, max_idxs = iou.max(dim=2, keepdim=True) # bs, num_preds, 1 (num_output_classes indices)
@@ -46,26 +47,29 @@ def calc_mIOU(preds, targets):
 
     return mIOU.mean()
 
-def hungarian_mIOU(preds, targets):
+def calc_hungarian_mIOU(preds, targets):
     # preds : bs, nc, h, w
     # targets: bs, nc, h, w
 
-    #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
+    #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.output_dim, FLAGS.image_size//8, FLAGS.image_size//8])
     #assert targets.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
 
-    intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
-    union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
-    iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
+    intersection = torch.logical_and(preds.unsqueeze(1), targets.unsqueeze(2)).sum(dim=(-1,-2))
+    union = torch.logical_or(preds.unsqueeze(1), targets.unsqueeze(2)).sum(dim=(-1,-2))
+    iou = intersection / (union + 0.001) # bs, num_output_classes, num_preds
 
-    present_cats = (intersection.sum(dim=1) > 0) # bs, num_output_classes
+    present_cats = targets.sum(dim=(2,3)) > 0 # bs, num_output_classes
+    iou = iou.to('cpu')
+    present_cats = present_cats.to('cpu')
 
-    # Compute maximum IOU per prediction
-    iou_per_cat, max_idxs = iou.max(dim=1) # bs, num_output_classes
+    mean_IOUs = []
+    mean_pixel_accs = []
+    for b_ix in range(iou.shape[0]):
+        row_ind, col_ind = linear_sum_assignment(iou[b_ix][present_cats[b_ix]]) # num_image_classes, num_preds
+        mean_IOUs.append(iou[b_ix][present_cats[b_ix]][row_ind, col_ind].mean()) # (num_image_classes).mean()
+        mean_pixel_accs.append((preds[b_ix][col_ind].argmax(dim=0) == targets[b_ix][present_cats[b_ix]][row_ind].argmax(dim=0)).float().mean())
 
-    # Calculate mIOU for present categories
-    mIOU = (iou_per_cat * present_cats.float()).sum(dim=1) / present_cats.float().sum(dim=1) # bs
-
-    return mIOU.mean()
+    return sum(mean_IOUs) / len(mean_IOUs), sum(mean_pixel_accs) / len(mean_pixel_accs)
 
 def assignMaxIOU(preds, targets):
     with torch.no_grad():
