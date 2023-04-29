@@ -16,7 +16,7 @@ from absl import flags
 
 FLAGS = flags.FLAGS
 
-color = np.random.randint(0,256,[255,3],dtype=np.uint8)
+color = np.random.randint(0,256,[256,3],dtype=np.uint8)
 
 
 def calc_mIOU(preds, targets):
@@ -113,6 +113,10 @@ def normalize_feature_maps(fm):
         return fm - fm.mean(dim=(2,3), keepdim=True)
     elif FLAGS.norm_type == 'layer_norm':
         return (fm - fm.mean(dim=(2,3), keepdim=True)) / fm.std(dim=(2,3), keepdim=True)
+    elif FLAGS.norm_type == 'no_norm':
+        return fm
+    elif FLAGS.norm_type == 'frobenius':
+        return F.normalize(fm.flatten(2), dim=2).reshape(*fm.shape)
 
 
 def random_crop(image, crop_dims, inter_mode='bilinear'):
@@ -146,7 +150,7 @@ def display_mask(mask):
     for c in range(mask.max()+1):
         display[mask == c] = color[c]
 
-    return np.repeat(np.repeat(display, 2, axis=0), 2, axis=1)
+    return display
 
 
 def vic_reg(x):

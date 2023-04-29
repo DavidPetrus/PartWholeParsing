@@ -13,7 +13,7 @@ FLAGS = flags.FLAGS
 
 class ImageParser(nn.Module):
 
-    def __init__(self, arch):
+    def __init__(self, arch, dropout=0.):
         super(ImageParser, self).__init__()
 
         self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').to('cuda')
@@ -24,23 +24,38 @@ class ImageParser(nn.Module):
         }
         self.dino_resnet = create_feature_extractor(dino_resnet, return_nodes=return_nodes).to('cuda')
 
+        convs = []
+        for l in range(FLAGS.depth):
+            convs.extend([nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU()])
         self.conv_x14 = nn.Sequential(
-            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=1.75, mode='bilinear'),
-            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
+            *convs,
+            torch.nn.Dropout(p=dropout), nn.Upsample(scale_factor=1.75, mode='bilinear'),
+            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU(), nn.Upsample(scale_factor=2, mode='bilinear'),
             nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
         ).to('cuda')
+        convs = []
+        for l in range(FLAGS.depth):
+            convs.extend([nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU()])
         self.conv_x8 = nn.Sequential(
-            nn.Conv2d(512, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
-            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(), nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(512, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU(),
+            *convs,
+            torch.nn.Dropout(p=dropout), nn.Upsample(scale_factor=2, mode='bilinear'),
             nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
         ).to('cuda')
+        convs = []
+        for l in range(FLAGS.depth):
+            convs.extend([nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU()])
         self.conv_x4 = nn.Sequential(
-            nn.Conv2d(256, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
-            nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.ReLU(),
-            nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
+            nn.Conv2d(256, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU(),
+            *convs,
+            torch.nn.Dropout(p=dropout), nn.Conv2d(384, FLAGS.embd_dim, kernel_size=3, padding='same'), nn.BatchNorm2d(384)
         ).to('cuda')
 
-        self.proj_layer = nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+        convs = []
+        for l in range(FLAGS.depth):
+            convs.extend([nn.Conv2d(384, 384, kernel_size=3, padding='same'), nn.BatchNorm2d(384), nn.GELU()])
+        self.proj_layer = nn.Sequential(*convs, nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1)).to('cuda')
+
         self.clusters = nn.Parameter(torch.randn(FLAGS.num_output_classes, FLAGS.embd_dim)).to('cuda')
         self.dino_clusters = nn.Parameter(torch.randn(FLAGS.num_output_classes, 384)).to('cuda')
 
@@ -59,6 +74,7 @@ class ImageParser(nn.Module):
     def forward(self, x, val=False):
         bs = FLAGS.miou_bs if val else FLAGS.batch_size
         v2_fm_size = FLAGS.eval_size//14 if val else FLAGS.image_size//14
+
         with torch.set_grad_enabled(FLAGS.train_dinov2):
             # get dino activations
             res = self.dinov2(x, is_training=True)

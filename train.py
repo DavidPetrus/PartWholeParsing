@@ -46,15 +46,17 @@ flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
 flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
+flags.DEFINE_integer('depth', 2, '')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
-flags.DEFINE_integer('output_dim', 48, '')
+flags.DEFINE_integer('output_dim', 64, '')
 
 flags.DEFINE_bool('student_eval', False, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 flags.DEFINE_bool('flip_image', True, '')
 flags.DEFINE_integer('num_epochs', 20, '')
+flags.DEFINE_float('dropout',0.,'')
 
 
 def main(argv):
@@ -123,7 +125,7 @@ def main(argv):
         validation_generator = torch.utils.data.DataLoader(validation_set, batch_size=None, shuffle=True, num_workers=FLAGS.num_workers)
 
 
-    student = ImageParser("vit_small")
+    student = ImageParser("vit_small", dropout=FLAGS.dropout)
     teacher = ImageParser("vit_small")
 
     teacher.load_state_dict(student.state_dict())
@@ -286,7 +288,7 @@ def main(argv):
                     img = (255*unnormalize(image_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_crop.png', img)
 
-                    mask = proj_feat_up[0].argmax(dim=1)
+                    mask = proj_feat_up[0].argmax(dim=0)
                     mask_disp = display_mask(mask.cpu().numpy())
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_mask.png', mask_disp)
 
