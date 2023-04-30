@@ -27,6 +27,9 @@ flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_bool('save_images',True,'')
+flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
+flags.DEFINE_string('seg_layers','attn','attn or conv')
+flags.DEFINE_bool('train_dinov1', False, '')
 flags.DEFINE_bool('train_dinov2', False, '')
 flags.DEFINE_bool('train_dino_resnet', True, '')
 flags.DEFINE_integer('batch_size',32,'')
@@ -36,7 +39,7 @@ flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
-flags.DEFINE_float('teacher_momentum', 0.995, '')
+flags.DEFINE_float('teacher_momentum', 0.98, '')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.5, '')
 flags.DEFINE_string('norm_type', 'mean', 'mean_max, mean_std, mean')
@@ -46,7 +49,8 @@ flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
 flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
-flags.DEFINE_integer('depth', 2, '')
+flags.DEFINE_integer('depth', 1, '')
+flags.DEFINE_integer('proj_depth',2,'')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_integer('output_dim', 64, '')
@@ -155,10 +159,10 @@ def main(argv):
                 labels = labels.to('cuda')
 
                 if FLAGS.student_eval:
-                    proj_feat, seg_feat, dino_feat = student(images, val=True)
+                    proj_feat = student(images, val=True)
                     #_, cluster_preds = student.cluster_lookup(seg_feat)
                 else:
-                    proj_feat, seg_feat, dino_feat = teacher(images, val=True)
+                    proj_feat = teacher(images, val=True)
                     #_, cluster_preds = teacher.cluster_lookup(seg_feat)
 
                 proj_feat = normalize_feature_maps(proj_feat)
@@ -203,16 +207,16 @@ def main(argv):
             dino_feats = []
             seg_feats = []
             for c in range(FLAGS.num_crops):
-                proj_feat_s, seg_feat, dino_feat = student(image_crops[c])
-                proj_feat_t, _, _ = teacher(image_crops[c])
+                proj_feat_s = student(image_crops[c])
+                proj_feat_t = teacher(image_crops[c])
 
                 proj_feat_s = normalize_feature_maps(proj_feat_s)
                 proj_feat_t = normalize_feature_maps(proj_feat_t)
 
                 proj_feats_s.append(proj_feat_s) # bs,no,h,w
                 proj_feats_t.append(proj_feat_t) # bs,no,h,w
-                seg_feats.append(seg_feat) # bs,c,h,w
-                dino_feats.append(dino_feat) # bs,c,h,w
+                #seg_feats.append(seg_feat) # bs,c,h,w
+                #dino_feats.append(dino_feat) # bs,c,h,w
 
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
