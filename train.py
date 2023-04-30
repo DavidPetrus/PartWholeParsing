@@ -135,8 +135,6 @@ def main(argv):
     teacher = ImageParser("vit_small")
 
     teacher.load_state_dict(student.state_dict())
-    print(student.state_dict())
-
     for p in teacher.parameters():
         p.requires_grad = False
 

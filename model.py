@@ -102,7 +102,7 @@ class ImageParser(nn.Module):
                 # get dino activations
                 feats_s8 = self.dinov1(x) # bs, h*w+1, c
                 if student:
-                    rand_mask = (torch.rand(feats_s8.shape[0], feats_s8.shape[1], 1, 1, device='cuda') > FLAGS.patch_masking).float()
+                    rand_mask = (torch.rand(feats_s8.shape[0], feats_s8.shape[1], 1, device='cuda') > FLAGS.patch_masking).float()
                     feats_s8 = feats_s8 * rand_mask
 
         elif FLAGS.backbone == 'dinov2':
@@ -126,7 +126,7 @@ class ImageParser(nn.Module):
         
         masks = self.proj_layer(F.normalize(self.proj_mlp(out_features), dim=1)) # bs,c,h,w
         if student and FLAGS.fm_noise > 0.:
-            fm_noise = torch.randn(*feats_s8.shape, device='cuda') * FLAGS.fm_noise
+            fm_noise = torch.randn(*masks.shape, device='cuda') * FLAGS.fm_noise
             masks = masks + fm_noise
 
         return masks
