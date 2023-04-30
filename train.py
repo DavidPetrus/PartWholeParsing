@@ -26,6 +26,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
+flags.DEFINE_integer('num_epochs', 20, '')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
 flags.DEFINE_string('seg_layers','attn','attn or conv')
@@ -39,7 +40,7 @@ flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
-flags.DEFINE_float('teacher_momentum', 0.98, '')
+flags.DEFINE_float('teacher_momentum', 0.99, '')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.5, '')
 flags.DEFINE_string('norm_type', 'mean', 'mean_max, mean_std, mean')
@@ -49,7 +50,7 @@ flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
 flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
-flags.DEFINE_integer('depth', 1, '')
+flags.DEFINE_integer('depth', 3, '')
 flags.DEFINE_integer('proj_depth',2,'')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
@@ -59,8 +60,9 @@ flags.DEFINE_bool('student_eval', False, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 flags.DEFINE_bool('flip_image', True, '')
-flags.DEFINE_integer('num_epochs', 20, '')
-flags.DEFINE_float('dropout',0.,'')
+flags.DEFINE_float('fm_noise', 0., '')
+flags.DEFINE_float('patch_masking', 0., '')
+flags.DEFINE_float('dropout',0., '')
 
 
 def main(argv):
@@ -133,6 +135,7 @@ def main(argv):
     teacher = ImageParser("vit_small")
 
     teacher.load_state_dict(student.state_dict())
+    print(student.state_dict())
 
     for p in teacher.parameters():
         p.requires_grad = False
@@ -197,9 +200,10 @@ def main(argv):
         student.train()
         teacher.train()
         for data in training_generator:
-            image_crops, labels, crop_dims = data
+            student_crops, teacher_crops, labels, crop_dims = data
             for c in range(FLAGS.num_crops):
-                image_crops[c] = image_crops[c].to('cuda')
+                student_crops[c] = student_crops[c].to('cuda')
+                teacher_crops[c] = teacher_crops[c].to('cuda')
                 labels[c] = labels[c].to('cuda')
 
             proj_feats_s = []
@@ -207,8 +211,8 @@ def main(argv):
             dino_feats = []
             seg_feats = []
             for c in range(FLAGS.num_crops):
-                proj_feat_s = student(image_crops[c])
-                proj_feat_t = teacher(image_crops[c])
+                proj_feat_s = student(student_crops[c], student=True)
+                proj_feat_t = teacher(teacher_crops[c])
 
                 proj_feat_s = normalize_feature_maps(proj_feat_s)
                 proj_feat_t = normalize_feature_maps(proj_feat_t)
@@ -289,7 +293,7 @@ def main(argv):
                     lab_disp = display_label(label.squeeze())
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_label.png', lab_disp)
 
-                    img = (255*unnormalize(image_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
+                    img = (255*unnormalize(teacher_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_crop.png', img)
 
                     mask = proj_feat_up[0].argmax(dim=0)

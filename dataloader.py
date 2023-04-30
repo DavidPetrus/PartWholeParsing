@@ -39,7 +39,8 @@ class Cityscapes(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
 
-        img_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
+        student_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
+        teacher_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
         label_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
         crop_dims = []
         for c in range(FLAGS.num_crops):
@@ -93,18 +94,19 @@ class Cityscapes(torch.utils.data.Dataset):
                         cr = torchvision.transforms.functional.hflip(cr)
                         lab_crop = torchvision.transforms.functional.hflip(lab_crop)
 
-                    img_batch[c].append(color_normalize(self.color_jitter(cr)))
+                    teacher_batch[c].append(color_normalize(cr))
+                    student_batch[c].append(color_normalize(self.color_jitter(cr)))
                     label_batch[c].append(lab_crop)
             else:
                 img = F.interpolate(img.unsqueeze(0),size=FLAGS.eval_size,mode='bilinear')
                 label = F.interpolate(label.unsqueeze(0).unsqueeze(0),size=FLAGS.eval_size,mode='nearest')
-                img_batch.append(color_normalize(img))
+                teacher_batch.append(color_normalize(img))
                 label_batch.append(label)
 
         if self.train:
-            return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+            return [torch.cat(cr,dim=0) for cr in student_batch], [torch.cat(cr,dim=0) for cr in teacher_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
         else:
-            return torch.cat(img_batch,dim=0), torch.cat(label_batch,dim=0)
+            return torch.cat(teacher_batch,dim=0), torch.cat(label_batch,dim=0)
 
 
     def __len__(self):

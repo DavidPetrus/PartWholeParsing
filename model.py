@@ -94,13 +94,16 @@ class ImageParser(nn.Module):
         self.proj_layer.weight_g.requires_grad = False
     
 
-    def forward(self, x, val=False):
+    def forward(self, x, val=False, student=False):
         bs = FLAGS.miou_bs if val else FLAGS.batch_size
         if FLAGS.backbone == 'dinov1':
             v1_fm_size = FLAGS.eval_size//8 if val else FLAGS.image_size//8
             with torch.set_grad_enabled(FLAGS.train_dinov1):
                 # get dino activations
                 feats_s8 = self.dinov1(x) # bs, h*w+1, c
+                if student:
+                    rand_mask = (torch.rand(feats_s8.shape[0], feats_s8.shape[1], 1, 1, device='cuda') > FLAGS.patch_masking).float()
+                    feats_s8 = feats_s8 * rand_mask
 
         elif FLAGS.backbone == 'dinov2':
             v2_fm_size = FLAGS.eval_size//14 if val else FLAGS.image_size//14
@@ -122,6 +125,9 @@ class ImageParser(nn.Module):
             out_features = F.upsample(out_features, scale_factor=2)
         
         masks = self.proj_layer(F.normalize(self.proj_mlp(out_features), dim=1)) # bs,c,h,w
+        if student and FLAGS.fm_noise > 0.:
+            fm_noise = torch.randn(*feats_s8.shape, device='cuda') * FLAGS.fm_noise
+            masks = masks + fm_noise
 
         return masks
 
@@ -262,11 +268,11 @@ class AttnBlock(nn.Module):
             dim,
             num_heads=num_heads,
             attn_drop=attn_drop,
-            proj_drop=drop)
+            proj_drop=FLAGS.dropout)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=FLAGS.dropout)
 
     def forward(self, x, mask=None):
         x = x + self.drop_path(self.attn(self.norm1(x), mask=mask))
