@@ -94,7 +94,7 @@ class Cityscapes(torch.utils.data.Dataset):
                         cr = torchvision.transforms.functional.hflip(cr)
                         lab_crop = torchvision.transforms.functional.hflip(lab_crop)
 
-                    teacher_batch[c].append(color_normalize(cr))
+                    #teacher_batch[c].append(color_normalize(cr))
                     student_batch[c].append(color_normalize(self.color_jitter(cr)))
                     label_batch[c].append(lab_crop)
             else:
@@ -104,7 +104,7 @@ class Cityscapes(torch.utils.data.Dataset):
                 label_batch.append(label)
 
         if self.train:
-            return [torch.cat(cr,dim=0) for cr in student_batch], [torch.cat(cr,dim=0) for cr in teacher_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+            return [torch.cat(cr,dim=0) for cr in student_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
         else:
             return torch.cat(teacher_batch,dim=0), torch.cat(label_batch,dim=0)
 

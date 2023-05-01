@@ -63,6 +63,7 @@ flags.DEFINE_bool('flip_image', True, '')
 flags.DEFINE_float('fm_noise', 0., '')
 flags.DEFINE_float('patch_masking', 0., '')
 flags.DEFINE_float('dropout',0., '')
+flags.DEFINE_float('weight_decay',0.01,'')
 
 
 def main(argv):
@@ -138,14 +139,14 @@ def main(argv):
     for p in teacher.parameters():
         p.requires_grad = False
 
-    optimizer = torch.optim.Adam(student.parameters(), lr=FLAGS.lr)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=FLAGS.lr, weight_decay=FLAGS.weight_decay)
 
     if FLAGS.save_images:
         if not os.path.exists('images/'+FLAGS.exp):
             os.mkdir('images/'+FLAGS.exp)
 
     train_iter = 0
-    #torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(True)
     for epoch in range(FLAGS.num_epochs):
 
         val_iter = 0
@@ -198,10 +199,10 @@ def main(argv):
         student.train()
         teacher.train()
         for data in training_generator:
-            student_crops, teacher_crops, labels, crop_dims = data
+            student_crops, labels, crop_dims = data
             for c in range(FLAGS.num_crops):
                 student_crops[c] = student_crops[c].to('cuda')
-                teacher_crops[c] = teacher_crops[c].to('cuda')
+                #teacher_crops[c] = teacher_crops[c].to('cuda')
                 labels[c] = labels[c].to('cuda')
 
             proj_feats_s = []
@@ -210,7 +211,7 @@ def main(argv):
             seg_feats = []
             for c in range(FLAGS.num_crops):
                 proj_feat_s = student(student_crops[c], student=True)
-                proj_feat_t = teacher(teacher_crops[c])
+                proj_feat_t = teacher(student_crops[c])
 
                 proj_feat_s = normalize_feature_maps(proj_feat_s)
                 proj_feat_t = normalize_feature_maps(proj_feat_t)
