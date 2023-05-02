@@ -41,8 +41,9 @@ flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
+flags.DEFINE_float('dice_coeff',1,'')
 flags.DEFINE_float('entropy_reg', 0., '')
-flags.DEFINE_float('mean_max_coeff', 0.5, '')
+flags.DEFINE_float('mean_max_coeff', 0.75, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
 flags.DEFINE_integer('miou_bs',1,'')
 
@@ -54,7 +55,7 @@ flags.DEFINE_integer('depth', 1, '')
 flags.DEFINE_integer('proj_depth',1,'')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
-flags.DEFINE_integer('output_dim', 64, '')
+flags.DEFINE_integer('output_dim', 128, '')
 
 flags.DEFINE_bool('student_eval', False, '')
 
@@ -224,6 +225,7 @@ def main(argv):
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
             contrastive_loss = 0.
+            dice_loss = 0.
             for s in range(FLAGS.num_crops):
                 for t in range(FLAGS.num_crops):
                     if s == t:
@@ -232,13 +234,21 @@ def main(argv):
                     feat_crop_s, feat_crop_t = student.match_crops(proj_feats_s[s], proj_feats_t[t], [crop_dims[s], crop_dims[t]])
 
                     target = F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach()
-                    class_balancing = 1 / (target.sum(dim=1, keepdim=True) + 0.001) # batch_size, output_dim, 1, 1
-                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='none') # bs,h,w
+                    #class_balancing = 1 / (target.sum(dim=1, keepdim=True) + 0.001) # batch_size, output_dim, 1, 1
+                    
+                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
+
+                    preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
+                    present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
+                    dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
+                    dice_loss += 1 - dice_term[present_cats].mean()
+
+
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
-            loss = contrastive_loss
+            loss = contrastive_loss + FLAGS.dice_coeff * dice_loss
 
             loss.backward()
             optimizer.step()
@@ -294,14 +304,14 @@ def main(argv):
                     lab_disp = display_label(label.squeeze())
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_label.png', lab_disp)
 
-                    img = (255*unnormalize(teacher_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
+                    img = (255*unnormalize(student_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_crop.png', img)
 
                     mask = proj_feat_up[0].argmax(dim=0)
                     mask_disp = display_mask(mask.cpu().numpy())
                     cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_mask.png', mask_disp)
 
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), \
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, \
                         "Contrastive_mIOU": cluster_mIOU.item(), "Hungarian_mIOU": hungarian_mIOU.item(), "Pixel_Acc": pixel_acc.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
                         "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}
