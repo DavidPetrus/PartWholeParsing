@@ -26,7 +26,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
-flags.DEFINE_integer('num_epochs', 20, '')
+flags.DEFINE_integer('num_epochs', 40, '')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
 flags.DEFINE_string('seg_layers','attn','attn or conv')
@@ -43,15 +43,15 @@ flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.5, '')
-flags.DEFINE_string('norm_type', 'mean', 'mean_max, mean_std, mean')
+flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
 flags.DEFINE_integer('miou_bs',1,'')
 
 flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
 flags.DEFINE_float('student_temp', 0.1, '')
 flags.DEFINE_float('teacher_temp', 0.04, '')
-flags.DEFINE_integer('depth', 3, '')
-flags.DEFINE_integer('proj_depth',2,'')
+flags.DEFINE_integer('depth', 1, '')
+flags.DEFINE_integer('proj_depth',1,'')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_integer('output_dim', 64, '')
@@ -231,7 +231,9 @@ def main(argv):
 
                     feat_crop_s, feat_crop_t = student.match_crops(proj_feats_s[s], proj_feats_t[t], [crop_dims[s], crop_dims[t]])
 
-                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach())
+                    target = F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach()
+                    class_balancing = 1 / (target.sum(dim=1, keepdim=True) + 0.001) # batch_size, output_dim, 1, 1
+                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='none') # bs,h,w
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
@@ -279,11 +281,11 @@ def main(argv):
                 #proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
                 hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
-                max_feat = proj_feat_s.argmax(dim=1)
+                max_feat = proj_feat_t.argmax(dim=1)
                 uniq_cat, output_counts = torch.unique(max_feat, return_counts = True)
                 most_freq_frac = output_counts.max() / output_counts.sum()
 
-                max_feat_img = proj_feat_s[0].argmax(dim=0)
+                max_feat_img = proj_feat_t[0].argmax(dim=0)
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
