@@ -3,9 +3,9 @@ import cv2
 import torch
 import torch.nn.functional as F
 import random
-torch.manual_seed(99)
-np.random.seed(23)
-random.seed(36)
+torch.manual_seed(77)
+np.random.seed(36)
+random.seed(23)
 #from torchvision import ColorJitter
 import glob
 import datetime
@@ -26,7 +26,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
-flags.DEFINE_integer('num_epochs', 40, '')
+flags.DEFINE_integer('num_epochs', 60, '')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
 flags.DEFINE_string('seg_layers','attn','attn or conv')
@@ -41,7 +41,7 @@ flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
-flags.DEFINE_float('dice_coeff',1,'')
+flags.DEFINE_float('dice_coeff',2.,'')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.75, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
@@ -55,13 +55,15 @@ flags.DEFINE_integer('depth', 1, '')
 flags.DEFINE_integer('proj_depth',1,'')
 flags.DEFINE_integer('kernel_size', 3, '')
 flags.DEFINE_integer('embd_dim', 384, '')
+flags.DEFINE_float('dice_factor',3,'')
+flags.DEFINE_integer('outp_dim2',0,'')
 flags.DEFINE_integer('output_dim', 128, '')
 
 flags.DEFINE_bool('student_eval', False, '')
 
 flags.DEFINE_float('aug_strength', 0.7, '')
 flags.DEFINE_bool('flip_image', True, '')
-flags.DEFINE_float('fm_noise', 0., '')
+flags.DEFINE_float('fm_noise', 0.1, '')
 flags.DEFINE_float('patch_masking', 0., '')
 flags.DEFINE_float('dropout',0., '')
 flags.DEFINE_float('weight_decay',0.01,'')
@@ -182,7 +184,12 @@ def main(argv):
                 #pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 #proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
-                hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                if FLAGS.outp_dim2 > 0:
+                    proj_feat_cat = torch.cat([F.one_hot(proj_feat_up[:,:FLAGS.output_dim].argmax(dim=1), FLAGS.output_dim), \
+                               F.one_hot(proj_feat_up[:,FLAGS.output_dim:].argmax(dim=1), FLAGS.outp_dim2)], dim=3).movedim(3,1)
+                    hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(proj_feat_cat, label_one_hot)
+                else:
+                    hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
                 
 
                 val_iter += 1
@@ -233,9 +240,19 @@ def main(argv):
 
                     feat_crop_s, feat_crop_t = student.match_crops(proj_feats_s[s], proj_feats_t[t], [crop_dims[s], crop_dims[t]])
 
+                    if FLAGS.outp_dim2 > 0:
+                        target = F.softmax(feat_crop_t[:,-FLAGS.outp_dim2:]/FLAGS.teacher_temp, dim=1).detach()
+                        contrastive_loss += F.cross_entropy(feat_crop_s[:,-FLAGS.outp_dim2:]/FLAGS.student_temp, target, reduction='mean')
+
+                        preds = F.softmax(feat_crop_s[:,-FLAGS.outp_dim2:]/FLAGS.student_temp, dim=1)
+                        present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
+                        dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
+                        dice_loss += (1 - dice_term[present_cats].mean()) / FLAGS.dice_factor
+
+                        feat_crop_s = feat_crop_s[:,:-FLAGS.outp_dim2]
+                        feat_crop_t = feat_crop_t[:,:-FLAGS.outp_dim2]
+
                     target = F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach()
-                    #class_balancing = 1 / (target.sum(dim=1, keepdim=True) + 0.001) # batch_size, output_dim, 1, 1
-                    
                     contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
 
                     preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
@@ -289,7 +306,12 @@ def main(argv):
                 #pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 #dino_clust_miou = calc_mIOU(F.one_hot(dino_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 #proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
-                hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
+                if FLAGS.outp_dim2 > 0:
+                    proj_feat_cat = torch.cat([F.one_hot(proj_feat_up[:,:FLAGS.output_dim].argmax(dim=1), FLAGS.output_dim), \
+                        F.one_hot(proj_feat_up[:,FLAGS.output_dim:].argmax(dim=1), FLAGS.outp_dim2)], dim=3).movedim(3,1)
+                    hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(proj_feat_cat, label_one_hot)
+                else:
+                    hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
 
                 max_feat = proj_feat_t.argmax(dim=1)
                 uniq_cat, output_counts = torch.unique(max_feat, return_counts = True)

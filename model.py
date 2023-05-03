@@ -89,7 +89,7 @@ class ImageParser(nn.Module):
         for l in range(FLAGS.proj_depth):
             proj_mlp.extend([nn.Conv2d(FLAGS.embd_dim, FLAGS.embd_dim, kernel_size=1), nn.GELU()])
         self.proj_mlp = nn.Sequential(*proj_mlp).to('cuda')
-        self.proj_layer = torch.nn.utils.weight_norm(nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim, kernel_size=1)).to('cuda')
+        self.proj_layer = torch.nn.utils.weight_norm(nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim+FLAGS.outp_dim2, kernel_size=1)).to('cuda')
         self.proj_layer.weight_g.data.fill_(1)
         self.proj_layer.weight_g.requires_grad = False
     
