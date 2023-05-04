@@ -116,58 +116,6 @@ class Cityscapes(torch.utils.data.Dataset):
             return len(self.image_files) // FLAGS.miou_bs
 
 
-class CelebA(torch.utils.data.Dataset):
-    def __init__(self, image_set):
-        super(CelebA, self).__init__()
-
-        self.image_files = glob.glob(f"{FLAGS.data_dir}/CelebAMask-HQ/CelebA-HQ-img/*")
-        if image_set == 'train':
-            self.image_files = self.image_files[:-3000]
-        else:
-            self.image_files = self.image_files[-3000:]
-
-        self.color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
-
-
-    def __getitem__(self, index):
-
-        img_batch = [[] for c in range(FLAGS.num_crops)]
-        label_batch = [[] for c in range(FLAGS.num_crops)]
-        crop_dims = []
-        for c in range(FLAGS.num_crops):
-            crop_size = np.random.uniform(FLAGS.min_crop,1.)
-            crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
-
-        batch_sample = random.sample(self.image_files, FLAGS.batch_size)
-
-        for img_file in batch_sample:
-            img_idx = int(img_file.split('/')[-1][:-4])
-            '''label_files = glob.glob(img_file.replace('CelebA-HQ-img', f'CelebAMask-HQ-mask-anno/{int(img_ix//2000)}/{img_ix:05d}_*'))
-            labels = {}
-            for lab_file in label_files:
-                cat = lab_file.split('_')[-1][:-4]
-                labels[cat] = torch.as_tensor(np.array(Image.open(lab_file)), dtype=torch.int64)'''
-
-            img = cv2.imread(img_file)
-
-            img = img[:,:,::-1]
-            h,w,_ = img.shape
-
-            img = transform_image(img)
-
-            for c in range(FLAGS.num_crops):
-                cr = random_crop(img, crop_dims=crop_dims[c])
-                #lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
-                img_batch[c].append(color_normalize(self.color_jitter(cr)))
-                #label_batch[c].append(lab_crop)
-
-        return [torch.cat(cr,dim=0) for cr in img_batch], [None] * FLAGS.batch_size, crop_dims
-
-
-    def __len__(self):
-        return len(self.image_files) // FLAGS.batch_size
-
-
 class Coco(torch.utils.data.Dataset):
     def __init__(self, image_set):
         super(Coco, self).__init__()
@@ -179,6 +127,11 @@ class Coco(torch.utils.data.Dataset):
             "val": ["val2017"],
             "train+val": ["train2017", "val2017"]
         }
+
+        if image_set == "train":
+            self.train = True
+        elif image_set == "val":
+            self.train = False
 
         self.image_files = []
         self.label_files = []
@@ -212,14 +165,20 @@ class Coco(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
 
-        img_batch = [[] for c in range(FLAGS.num_crops)]
-        label_batch = [[] for c in range(FLAGS.num_crops)]
+        image_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
+        label_batch = [[] for c in range(FLAGS.num_crops)] if self.train else []
+
         crop_dims = []
         for c in range(FLAGS.num_crops):
             crop_size = np.random.uniform(FLAGS.min_crop,1.)
             crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
+            if FLAGS.flip_image and np.random.random() > 0.5:
+                crop_dims[c].append(True)
+            else:
+                crop_dims[c].append(False)
 
-        batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size)
+        batch_sample = random.sample(list(zip(self.image_files,self.label_files)),FLAGS.batch_size) \
+                       if self.train else random.sample(list(zip(self.image_files,self.label_files)), FLAGS.miou_bs)
 
         for img_file, label_file in batch_sample:
             while True:
@@ -238,31 +197,62 @@ class Coco(torch.utils.data.Dataset):
 
             label[label == 255] = -1
 
-            if FLAGS.num_output_classes == 28:
+            img_h, img_w, _ = img.shape
+
+            # Make image square
+            if img_w > img_h:
+                square_x = np.random.randint(0, img_w-img_h) if self.train else int((img_w-img_h)/2)
+                img = img[:, square_x: square_x+img_h]
+                label = label[:, square_x: square_x+img_h]
+            elif img_h > img_w:
+                square_y = np.random.randint(0, img_h-img_w) if self.train else int((img_h-img_w)/2)
+                img = img[square_y: square_y+img_w, :]
+                label = label[square_y: square_y+img_w, :]
+
+            if FLAGS.num_output_classes == 27:
                 coarse_label = torch.zeros_like(label)
                 for fine, coarse in self.fine_to_coarse.items():
                     coarse_label[label == fine] = coarse
             else:
                 coarse_label = label
 
-            coarse_label[coarse_label == -1] = FLAGS.num_output_classes-1
+            coarse_label[coarse_label == -1] = FLAGS.num_output_classes
+            coarse_label = coarse_label.float()
 
             img = img[:,:,::-1]
             h,w,_ = img.shape
 
             img = transform_image(img)
 
-            for c in range(FLAGS.num_crops):
-                cr = random_crop(img, crop_dims=crop_dims[c])
-                lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
-                img_batch[c].append(color_normalize(self.color_jitter(cr)))
-                label_batch[c].append(lab_crop)
+            if self.train:
+                for c in range(FLAGS.num_crops):
+                    cr = random_crop(img, crop_dims=crop_dims[c])
+                    lab_crop = random_crop(coarse_label.unsqueeze(0), crop_dims=crop_dims[c], inter_mode='nearest')
+                    if crop_dims[c][3] == True:
+                        cr = torchvision.transforms.functional.hflip(cr)
+                        lab_crop = torchvision.transforms.functional.hflip(lab_crop)
 
-        return [torch.cat(cr,dim=0) for cr in img_batch], [torch.cat(cr,dim=0).squeeze() for cr in label_batch], crop_dims
+                    image_batch[c].append(color_normalize(self.color_jitter(cr)))
+                    label_batch[c].append(lab_crop)
+            else:
+                img = F.interpolate(img.unsqueeze(0),size=FLAGS.eval_size,mode='bilinear')
+                label = F.interpolate(coarse_label.unsqueeze(0).unsqueeze(0),size=FLAGS.eval_size,mode='nearest')
+                image_batch.append(color_normalize(img))
+                label_batch.append(label)
+
+        if self.train:
+            return [torch.cat(cr,dim=0) for cr in image_batch], [torch.cat(cr,dim=0) for cr in label_batch], crop_dims
+        else:
+            return torch.cat(image_batch,dim=0), torch.cat(label_batch,dim=0)
 
 
     def __len__(self):
-        return len(self.image_files) // FLAGS.batch_size
+        if self.train:
+            #return len(self.image_files) // FLAGS.batch_size
+            return 3000
+        else:
+            #return len(self.image_files) // FLAGS.miou_bs
+            return 300
 
 
 class ADE20k_2017(torch.utils.data.Dataset):
@@ -340,3 +330,55 @@ class ADE_Challenge(torch.utils.data.Dataset):
         ann = self.transform(ann).long()[0]
 
         return img, ann
+
+
+class CelebA(torch.utils.data.Dataset):
+    def __init__(self, image_set):
+        super(CelebA, self).__init__()
+
+        self.image_files = glob.glob(f"{FLAGS.data_dir}/CelebAMask-HQ/CelebA-HQ-img/*")
+        if image_set == 'train':
+            self.image_files = self.image_files[:-3000]
+        else:
+            self.image_files = self.image_files[-3000:]
+
+        self.color_jitter = ColorJitter(brightness=FLAGS.aug_strength, contrast=FLAGS.aug_strength, saturation=FLAGS.aug_strength, hue=0.2*FLAGS.aug_strength)
+
+
+    def __getitem__(self, index):
+
+        img_batch = [[] for c in range(FLAGS.num_crops)]
+        label_batch = [[] for c in range(FLAGS.num_crops)]
+        crop_dims = []
+        for c in range(FLAGS.num_crops):
+            crop_size = np.random.uniform(FLAGS.min_crop,1.)
+            crop_dims.append([np.random.uniform(0.,1.-crop_size),np.random.uniform(0.,1.-crop_size),crop_size])
+
+        batch_sample = random.sample(self.image_files, FLAGS.batch_size)
+
+        for img_file in batch_sample:
+            img_idx = int(img_file.split('/')[-1][:-4])
+            '''label_files = glob.glob(img_file.replace('CelebA-HQ-img', f'CelebAMask-HQ-mask-anno/{int(img_ix//2000)}/{img_ix:05d}_*'))
+            labels = {}
+            for lab_file in label_files:
+                cat = lab_file.split('_')[-1][:-4]
+                labels[cat] = torch.as_tensor(np.array(Image.open(lab_file)), dtype=torch.int64)'''
+
+            img = cv2.imread(img_file)
+
+            img = img[:,:,::-1]
+            h,w,_ = img.shape
+
+            img = transform_image(img)
+
+            for c in range(FLAGS.num_crops):
+                cr = random_crop(img, crop_dims=crop_dims[c])
+                #lab_crop = random_crop(coarse_label.unsqueeze(0).to(torch.float32), crop_dims=crop_dims[c], inter_mode='nearest').to(torch.long)
+                img_batch[c].append(color_normalize(self.color_jitter(cr)))
+                #label_batch[c].append(lab_crop)
+
+        return [torch.cat(cr,dim=0) for cr in img_batch], [None] * FLAGS.batch_size, crop_dims
+
+
+    def __len__(self):
+        return len(self.image_files) // FLAGS.batch_size

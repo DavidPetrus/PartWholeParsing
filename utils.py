@@ -135,7 +135,7 @@ def random_crop(image, crop_dims, inter_mode='bilinear'):
 def display_label(label):
     global color
 
-    display = np.zeros([FLAGS.image_size, FLAGS.image_size, 3], dtype=np.uint8)
+    display = np.zeros([FLAGS.eval_size, FLAGS.eval_size, 3], dtype=np.uint8)
     for c in range(FLAGS.num_output_classes):
         display[label == c] = color[c]
 

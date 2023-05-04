@@ -3,9 +3,9 @@ import cv2
 import torch
 import torch.nn.functional as F
 import random
-torch.manual_seed(77)
-np.random.seed(36)
-random.seed(23)
+torch.manual_seed(66)
+np.random.seed(66)
+random.seed(66)
 #from torchvision import ColorJitter
 import glob
 import datetime
@@ -34,7 +34,7 @@ flags.DEFINE_bool('train_dinov1', False, '')
 flags.DEFINE_bool('train_dinov2', False, '')
 flags.DEFINE_bool('train_dino_resnet', True, '')
 flags.DEFINE_integer('batch_size',32,'')
-flags.DEFINE_float('lr',0.0003,'')
+flags.DEFINE_float('lr',0.0001,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('eval_size',336,'')
@@ -199,6 +199,19 @@ def main(argv):
                 if val_iter > 3 and epoch==0:
                     break
 
+            if FLAGS.save_images:
+                label = labels[0].cpu().long().numpy()
+                lab_disp = display_label(label.squeeze())
+                cv2.imwrite(f'images/{FLAGS.exp}/{epoch}_label.png', lab_disp)
+
+                img = (255*unnormalize(images[0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
+                cv2.imwrite(f'images/{FLAGS.exp}/{epoch}_crop.png', img)
+
+                mask = proj_feat_up[0].argmax(dim=0)
+                mask_disp = display_mask(mask.cpu().numpy())
+                cv2.imwrite(f'images/{FLAGS.exp}/{epoch}_mask.png', mask_disp)
+
+
             log_dict = {"Epoch": epoch, "Val Hungarian mIOU": val_miou/val_iter, "Val Pixel Acc": val_pix_acc/val_iter}
             print(log_dict)
 
@@ -320,18 +333,6 @@ def main(argv):
                 max_feat_img = proj_feat_t[0].argmax(dim=0)
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
-
-                if FLAGS.save_images and train_iter % 100 == 0:
-                    label = labels[0][0].cpu().long().numpy()
-                    lab_disp = display_label(label.squeeze())
-                    cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_label.png', lab_disp)
-
-                    img = (255*unnormalize(student_crops[0][0])).long().movedim(0,2).cpu().numpy()[:,:,::-1]
-                    cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_crop.png', img)
-
-                    mask = proj_feat_up[0].argmax(dim=0)
-                    mask_disp = display_mask(mask.cpu().numpy())
-                    cv2.imwrite(f'images/{FLAGS.exp}/{train_iter}_mask.png', mask_disp)
 
             log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, \
                         "Contrastive_mIOU": cluster_mIOU.item(), "Hungarian_mIOU": hungarian_mIOU.item(), "Pixel_Acc": pixel_acc.item(), \
