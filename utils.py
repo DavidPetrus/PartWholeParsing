@@ -65,6 +65,8 @@ def calc_hungarian_mIOU(preds, targets):
     mean_IOUs = []
     mean_pixel_accs = []
     for b_ix in range(iou.shape[0]):
+        if present_cats[b_ix].sum() == 0: 
+            continue
         row_ind, col_ind = linear_sum_assignment(-iou[b_ix]) # num_output_classes, num_preds
         mean_IOUs.append(iou[b_ix][row_ind[present_cats[b_ix]], col_ind[present_cats[b_ix]]].mean()) # (num_image_classes).mean()
         # Might need to take the max of all categories instead of taking the max of all categories present in the image

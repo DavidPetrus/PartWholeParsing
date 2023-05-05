@@ -34,14 +34,15 @@ flags.DEFINE_bool('train_dinov1', False, '')
 flags.DEFINE_bool('train_dinov2', False, '')
 flags.DEFINE_bool('train_dino_resnet', True, '')
 flags.DEFINE_integer('batch_size',32,'')
-flags.DEFINE_float('lr',0.0001,'')
+flags.DEFINE_float('lr',0.0003,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
-flags.DEFINE_float('dice_coeff',2.,'')
+flags.DEFINE_float('cont_coeff',0.3,'')
+flags.DEFINE_float('score_coeff',3.,'')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.75, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
@@ -58,6 +59,10 @@ flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_float('dice_factor',3,'')
 flags.DEFINE_integer('outp_dim2',0,'')
 flags.DEFINE_integer('output_dim', 128, '')
+
+flags.DEFINE_bool('linear_score',False,'')
+flags.DEFINE_bool('sg_on_masks',False,'')
+flags.DEFINE_bool('sg_on_scores', False,'')
 
 flags.DEFINE_bool('student_eval', False, '')
 
@@ -230,12 +235,13 @@ def main(argv):
             proj_feats_t = []
             dino_feats = []
             seg_feats = []
+            scores = []
             for c in range(FLAGS.num_crops):
-                proj_feat_s = student(student_crops[c], student=True)
-                proj_feat_t = teacher(student_crops[c])
+                unnorm_feat_s = student(student_crops[c], student=True)
+                unnorm_feat_t = teacher(student_crops[c])
 
-                proj_feat_s = normalize_feature_maps(proj_feat_s)
-                proj_feat_t = normalize_feature_maps(proj_feat_t)
+                proj_feat_s = normalize_feature_maps(unnorm_feat_s)
+                proj_feat_t = normalize_feature_maps(unnorm_feat_t)
 
                 proj_feats_s.append(proj_feat_s) # bs,no,h,w
                 proj_feats_t.append(proj_feat_t) # bs,no,h,w
@@ -244,8 +250,13 @@ def main(argv):
 
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
+                preds = F.softmax(proj_feat_s/FLAGS.student_temp, dim=1) # bs,no,h,w
+                scores.append(student.obtain_scores(preds, unnorm_feat_s)) # bs,no
+
+
             contrastive_loss = 0.
             dice_loss = 0.
+            score_loss = 0.
             for s in range(FLAGS.num_crops):
                 for t in range(FLAGS.num_crops):
                     if s == t:
@@ -271,14 +282,18 @@ def main(argv):
                     preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
                     present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
                     dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
-                    dice_loss += 1 - dice_term[present_cats].mean()
-
+                    
+                    #crop_scores = scores[s][present_cats].detach() if FLAGS.sg_on_scores else scores[s][present_cats]
+                    #dice_loss += -(dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
+                    dice_loss += -dice_term[present_cats]
+                    
+                    score_loss += F.mse_loss(scores[s][present_cats], dice_term[present_cats].detach())
 
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
-            loss = contrastive_loss + FLAGS.dice_coeff * dice_loss
+            loss = dice_loss + FLAGS.score_coeff * score_loss + FLAGS.cont_coeff * contrastive_loss
 
             loss.backward()
             optimizer.step()
@@ -334,7 +349,7 @@ def main(argv):
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, \
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, "Score Loss": score_loss, \
                         "Contrastive_mIOU": cluster_mIOU.item(), "Hungarian_mIOU": hungarian_mIOU.item(), "Pixel_Acc": pixel_acc.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
                         "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}

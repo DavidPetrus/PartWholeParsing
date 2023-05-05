@@ -92,6 +92,9 @@ class ImageParser(nn.Module):
         self.proj_layer = torch.nn.utils.weight_norm(nn.Conv2d(FLAGS.embd_dim, FLAGS.output_dim+FLAGS.outp_dim2, kernel_size=1)).to('cuda')
         self.proj_layer.weight_g.data.fill_(1)
         self.proj_layer.weight_g.requires_grad = False
+
+        if FLAGS.linear_score:
+            self.score_proj = nn.Conv2d(FLAGS.output_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
     
 
     def forward(self, x, val=False, student=False):
@@ -130,6 +133,17 @@ class ImageParser(nn.Module):
             masks = masks + fm_noise
 
         return masks
+
+
+    def obtain_scores(self, sm_masks, unnorm_masks):
+        sm_masks = sm_masks.detach() if FLAGS.sg_on_masks else sm_masks
+        if FLAGS.linear_score:
+            scores = (self.score_proj(unnorm_masks).sigmoid() * sm_masks).sum(dim=(2,3)) / (sm_masks.sum(dim=(2,3)) + 0.0001) # bs, num_masks
+        else:
+            scores = (unnorm_masks * sm_masks).sum(dim=(2,3)) / (sm_masks.sum(dim=(2,3)) + 0.0001) # bs, num_masks
+
+        return scores
+
 
     def match_crops(self, sims_a, sims_b, crop_dims):
         #sims_a = sims_a.reshape(FLAGS.batch_size, FLAGS.output_dim, self.fm_size, self.fm_size)

@@ -138,7 +138,8 @@ class Coco(torch.utils.data.Dataset):
 
         for split_dir in split_dirs[self.split]:
             self.image_files = glob.glob(f"{FLAGS.data_dir}/coco/{split_dir}/*.jpg")
-            self.label_files = glob.glob(f"{FLAGS.data_dir}/coco/stuffthingmaps_trainval2017/{split_dir}/*.png")
+            #self.label_files = glob.glob(f"{FLAGS.data_dir}/coco/stuffthingmaps_trainval2017/{split_dir}/*.png")
+            self.label_files = glob.glob(f"{FLAGS.data_dir}/coco/{split_dir}/*.png")
             self.image_files.sort()
             self.label_files.sort()
 
@@ -216,7 +217,7 @@ class Coco(torch.utils.data.Dataset):
             else:
                 coarse_label = label
 
-            coarse_label[coarse_label == -1] = FLAGS.num_output_classes
+            coarse_label[label == -1] = FLAGS.num_output_classes
             coarse_label = coarse_label.float()
 
             img = img[:,:,::-1]
@@ -249,10 +250,10 @@ class Coco(torch.utils.data.Dataset):
     def __len__(self):
         if self.train:
             #return len(self.image_files) // FLAGS.batch_size
-            return 3000
+            return 5000 // FLAGS.batch_size
         else:
             #return len(self.image_files) // FLAGS.miou_bs
-            return 300
+            return 500 // FLAGS.batch_size
 
 
 class ADE20k_2017(torch.utils.data.Dataset):
