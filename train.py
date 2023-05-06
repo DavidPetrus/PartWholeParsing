@@ -61,8 +61,6 @@ flags.DEFINE_integer('outp_dim2',0,'')
 flags.DEFINE_integer('output_dim', 128, '')
 
 flags.DEFINE_bool('linear_score',False,'')
-flags.DEFINE_bool('sg_on_masks',False,'')
-flags.DEFINE_bool('sg_on_scores', False,'')
 
 flags.DEFINE_bool('student_eval', False, '')
 
@@ -235,7 +233,8 @@ def main(argv):
             proj_feats_t = []
             dino_feats = []
             seg_feats = []
-            scores = []
+            scores_s = []
+            scores_t = []
             for c in range(FLAGS.num_crops):
                 unnorm_feat_s = student(student_crops[c], student=True)
                 unnorm_feat_t = teacher(student_crops[c])
@@ -250,8 +249,10 @@ def main(argv):
 
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
-                preds = F.softmax(proj_feat_s/FLAGS.student_temp, dim=1) # bs,no,h,w
-                scores.append(student.obtain_scores(preds, unnorm_feat_s)) # bs,no
+                preds_s = F.softmax(proj_feat_s/FLAGS.student_temp, dim=1) # bs,no,h,w
+                scores_s.append(student.obtain_scores(preds_s, unnorm_feat_s)) # bs,no
+                preds_t = F.softmax(proj_feat_t/FLAGS.teacher_temp, dim=1) # bs,no,h,w
+                scores_t.append(teacher.obtain_scores(preds_t, unnorm_feat_s)) # bs,no
 
 
             contrastive_loss = 0.
@@ -283,11 +284,11 @@ def main(argv):
                     present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
                     dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
                     
-                    #crop_scores = scores[s][present_cats].detach() if FLAGS.sg_on_scores else scores[s][present_cats]
-                    #dice_loss += -(dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
-                    dice_loss += -dice_term[present_cats]
+                    crop_scores = scores_t[t][present_cats].detach()
+                    dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
+                    #dice_loss += 1 - dice_term[present_cats].mean()
                     
-                    score_loss += F.mse_loss(scores[s][present_cats], dice_term[present_cats].detach())
+                    score_loss += F.mse_loss(scores_s[s][present_cats], dice_term[present_cats].detach())
 
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w

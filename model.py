@@ -136,7 +136,7 @@ class ImageParser(nn.Module):
 
 
     def obtain_scores(self, sm_masks, unnorm_masks):
-        sm_masks = sm_masks.detach() if FLAGS.sg_on_masks else sm_masks
+        sm_masks = sm_masks.detach()
         if FLAGS.linear_score:
             scores = (self.score_proj(unnorm_masks).sigmoid() * sm_masks).sum(dim=(2,3)) / (sm_masks.sum(dim=(2,3)) + 0.0001) # bs, num_masks
         else:
