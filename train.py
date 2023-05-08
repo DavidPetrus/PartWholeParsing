@@ -28,6 +28,7 @@ flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_integer('num_epochs', 60, '')
 flags.DEFINE_bool('save_images',True,'')
+flags.DEFINE_bool('instance_seg', False, '')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
 flags.DEFINE_string('seg_layers','attn','attn or conv')
 flags.DEFINE_bool('train_dinov1', False, '')
@@ -47,6 +48,7 @@ flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.75, '')
 flags.DEFINE_string('norm_type', 'mean_max', 'mean_max, mean_std, mean')
 flags.DEFINE_integer('miou_bs',1,'')
+flags.DEFINE_integer('sem_width', 1024, '')
 
 flags.DEFINE_integer('num_output_classes', 27, '')
 flags.DEFINE_float('entropy_temp', 0.05, '')
@@ -177,7 +179,7 @@ def main(argv):
 
                 label = labels[:FLAGS.miou_bs].long().squeeze(1)
                 #cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
-                proj_feat_up = F.upsample(proj_feat[:FLAGS.miou_bs], scale_factor=4)
+                proj_feat_up = F.upsample(proj_feat[:FLAGS.miou_bs], scale_factor=8)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()
@@ -249,10 +251,10 @@ def main(argv):
 
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
-                preds_s = F.softmax(proj_feat_s/FLAGS.student_temp, dim=1) # bs,no,h,w
-                scores_s.append(student.obtain_scores(preds_s, unnorm_feat_s)) # bs,no
-                preds_t = F.softmax(proj_feat_t/FLAGS.teacher_temp, dim=1) # bs,no,h,w
-                scores_t.append(teacher.obtain_scores(preds_t, unnorm_feat_s)) # bs,no
+                #preds_s = F.softmax(proj_feat_s/FLAGS.student_temp, dim=1) # bs,no,h,w
+                #scores_s.append(student.obtain_scores(preds_s, unnorm_feat_s)) # bs,no
+                #preds_t = F.softmax(proj_feat_t/FLAGS.teacher_temp, dim=1) # bs,no,h,w
+                #scores_t.append(teacher.obtain_scores(preds_t, unnorm_feat_s)) # bs,no
 
 
             contrastive_loss = 0.
@@ -278,23 +280,32 @@ def main(argv):
                         feat_crop_t = feat_crop_t[:,:-FLAGS.outp_dim2]
 
                     target = F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach()
-                    contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
 
                     preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
-                    present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
-                    dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
+                    present_cats = target.mean(dim=(2,3)) > (2 / (target.shape[2]*target.shape[3])) # bs, c
+                    if FLAGS.instance_seg:
+                        numerator = (preds.unsqueeze(2) * target.unsqueeze(1)).sum(dim=(-1,-2)) # bs, num_targets, num_preds
+                        denominator = (preds.unsqueeze(2)**2 + target.unsqueeze(1)**2).sum(dim=(-1,-2)) # bs, num_targets, num_preds
+                        overlaps = 2*numerator / (denominator + 0.0001)
+                        dice_term, max_idxs = overlaps.max(dim=2) # bs,num_targets
+
+                        student_matches = torch.gather(preds, 1, max_idxs.reshape(max_idxs.shape[0],max_idxs.shape[1],1,1).tile(1,1,preds.shape[2],preds.shape[3]))
+                        contrastive_loss += F.cross_entropy(student_matches/FLAGS.student_temp, target, reduction='mean')
+                    else:
+                        contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
+                        dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
                     
-                    crop_scores = scores_t[t][present_cats].detach()
-                    dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
-                    #dice_loss += 1 - dice_term[present_cats].mean()
+                    #crop_scores = scores_t[t][present_cats].detach()
+                    #dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
+                    dice_loss += 1 - dice_term[present_cats].mean()
                     
-                    score_loss += F.mse_loss(scores_s[s][present_cats], dice_term[present_cats].detach())
+                    #score_loss += F.mse_loss(scores_s[s][present_cats], dice_term[present_cats].detach())
 
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
-            loss = dice_loss + FLAGS.score_coeff * score_loss + FLAGS.cont_coeff * contrastive_loss
+            loss = dice_loss + FLAGS.cont_coeff * contrastive_loss
 
             loss.backward()
             optimizer.step()
@@ -326,7 +337,7 @@ def main(argv):
                 label[label < 0] = FLAGS.num_output_classes
                 #cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
                 #dino_preds = F.upsample(dino_preds[:FLAGS.miou_bs], scale_factor=14)
-                proj_feat_up = F.upsample(proj_feats_s[0][:FLAGS.miou_bs], scale_factor=4)
+                proj_feat_up = F.upsample(proj_feats_s[0][:FLAGS.miou_bs], scale_factor=8)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #dino_acc = (dino_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
@@ -350,7 +361,7 @@ def main(argv):
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, "Score Loss": score_loss, \
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss.item(), \
                         "Contrastive_mIOU": cluster_mIOU.item(), "Hungarian_mIOU": hungarian_mIOU.item(), "Pixel_Acc": pixel_acc.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
                         "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}

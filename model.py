@@ -95,6 +95,16 @@ class ImageParser(nn.Module):
 
         if FLAGS.linear_score:
             self.score_proj = nn.Conv2d(FLAGS.output_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
+
+        if FLAGS.instance_seg:
+            if FLAGS.semantic_head == 'attn':
+                self.sem_proj = nn.Linear(FLAGS.embd_dim, FLAGS.sem_width).to('cuda')
+            
+            self.sem_mlp = nn.Sequential(nn.Linear(FLAGS.sem_width, FLAGS.sem_width), nn.GELU(), nn.Linear(FLAGS.sem_width, FLAGS.sem_width//2), nn.GELU(), \
+                                         nn.Linear(FLAGS.sem_width//2, FLAGS.embd_dim), nn.GELU()).to('cuda')
+            self.sem_final = torch.nn.utils.weight_norm(nn.Linear(FLAGS.embd_dim, FLAGS.output_dim+FLAGS.outp_dim2)).to('cuda')
+            self.sem_final.weight_g.data.fill_(1)
+            self.sem_final.weight_g.requires_grad = False
     
 
     def forward(self, x, val=False, student=False):
@@ -125,7 +135,6 @@ class ImageParser(nn.Module):
         elif FLAGS.seg_layers == 'attn':
             out_features = self.attn_layers(feats_s8)
             out_features = out_features[:,1:].reshape(bs, v1_fm_size, v1_fm_size, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
-            out_features = F.upsample(out_features, scale_factor=2)
         
         masks = self.proj_layer(F.normalize(self.proj_mlp(out_features), dim=1)) # bs,c,h,w
         if student and FLAGS.fm_noise > 0.:
@@ -133,6 +142,13 @@ class ImageParser(nn.Module):
             masks = masks + fm_noise
 
         return masks
+
+    def forward_seg_head(self, dino_feat, masks):
+        # masks bs,no,h,w
+        #masks = masks[masks.mean(dim=(2,3)) > (2 / (masks.shape[2]*masks.shape[3]))]
+        #masks = 
+        proj_feat = self.sem_proj(dino_feat) # bs, sem_width, h, w
+        mask_avgs = (proj_feat.unsqueeze(dim=1))
 
 
     def obtain_scores(self, sm_masks, unnorm_masks):
@@ -187,7 +203,7 @@ class ImageParser(nn.Module):
                     round((overlap_dims[0] - s_dims[0]) * fm_scale_s): \
                     round((overlap_dims[2] - s_dims[0]) * fm_scale_s)] # B,c,fm_b_h,fm_b_w
         
-        fm_s_crop = F.interpolate(fm_s_crop, size=(fm_l_crop.shape[2], fm_l_crop.shape[3]), mode='bilinear', align_corners=False)
+        fm_s_crop = F.interpolate(fm_s_crop, size=(fm_l_crop.shape[2], fm_l_crop.shape[3]), mode='nearest')
 
         if crop_dims[1][2] > crop_dims[0][2]:
             return fm_s_crop, fm_l_crop
