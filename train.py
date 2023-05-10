@@ -16,7 +16,7 @@ import os
 
 from dataloader import ADE20k_2017, ADE_Challenge, Coco, CelebA, Cityscapes
 from model import ImageParser
-from utils import unnormalize, display_label, display_mask, calc_mIOU, normalize_feature_maps, calc_hungarian_mIOU
+from utils import unnormalize, display_label, display_mask, calc_mIOU, normalize_feature_maps, calc_hungarian_mIOU, get_stats
 import wandb
 
 from absl import flags, app
@@ -27,6 +27,7 @@ flags.DEFINE_string('exp','test','')
 flags.DEFINE_string('data_dir', '/mnt/lustre/users/dvanniekerk1', '')
 flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_integer('num_epochs', 60, '')
+flags.DEFINE_bool('sq_dice',False,'')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_bool('instance_seg', False, '')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
@@ -35,14 +36,14 @@ flags.DEFINE_bool('train_dinov1', False, '')
 flags.DEFINE_bool('train_dinov2', False, '')
 flags.DEFINE_bool('train_dino_resnet', True, '')
 flags.DEFINE_integer('batch_size',32,'')
-flags.DEFINE_float('lr',0.0003,'')
+flags.DEFINE_float('lr',0.0001,'')
 flags.DEFINE_integer('num_workers',8,'')
 flags.DEFINE_integer('image_size',224,'')
 flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',2,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
-flags.DEFINE_float('cont_coeff',0.3,'')
+flags.DEFINE_float('cont_coeff',1.,'')
 flags.DEFINE_float('score_coeff',3.,'')
 flags.DEFINE_float('entropy_reg', 0., '')
 flags.DEFINE_float('mean_max_coeff', 0.75, '')
@@ -61,6 +62,7 @@ flags.DEFINE_integer('embd_dim', 384, '')
 flags.DEFINE_float('dice_factor',3,'')
 flags.DEFINE_integer('outp_dim2',0,'')
 flags.DEFINE_integer('output_dim', 128, '')
+flags.DEFINE_integer('min_mask_area',0,'')
 
 flags.DEFINE_bool('linear_score',False,'')
 
@@ -162,6 +164,7 @@ def main(argv):
         with torch.no_grad():
             student.eval()
             teacher.eval()
+            stats = torch.zeros(FLAGS.num_output_classes, FLAGS.output_dim).long().to('cuda')
             for data in validation_generator:
 
                 images, labels = data
@@ -177,14 +180,14 @@ def main(argv):
 
                 proj_feat = normalize_feature_maps(proj_feat)
 
-                label = labels[:FLAGS.miou_bs].long().squeeze(1)
+                label = labels.long().squeeze(1)
                 #cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
-                proj_feat_up = F.upsample(proj_feat[:FLAGS.miou_bs], scale_factor=8)
+                proj_feat_up = F.upsample(proj_feat, scale_factor=4)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #acc_clust = (feat_crop_s.argmax(dim=-1) == feat_crop_t.argmax(dim=-1)).float().mean()
 
-                label[label < 0] = FLAGS.num_output_classes
+                '''label[label < 0] = FLAGS.num_output_classes
                 label_one_hot = F.one_hot(label, FLAGS.num_output_classes+1)[:,:,:,:-1].movedim(3,1) # bs,nc,h,w
                 #pred_clust_miou = calc_mIOU(F.one_hot(cluster_preds.argmax(dim=1), FLAGS.num_output_classes).movedim(3,1), label_one_hot)
                 #proj_clust_miou = calc_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
@@ -195,14 +198,19 @@ def main(argv):
                     hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(proj_feat_cat, label_one_hot)
                 else:
                     hungarian_mIOU, pixel_acc = calc_hungarian_mIOU(F.one_hot(proj_feat_up.argmax(dim=1), FLAGS.output_dim).movedim(3,1), label_one_hot)
-                
+
+                val_miou += hungarian_mIOU
+                val_pix_acc += pixel_acc'''
+
+                stats = stats + get_stats(proj_feat_up.argmax(dim=1), label)
 
                 val_iter += 1
-                val_miou += hungarian_mIOU
-                val_pix_acc += pixel_acc
 
                 if val_iter > 3 and epoch==0:
                     break
+
+            ious, acc = calc_mIOU(stats)
+            print(ious)
 
             if FLAGS.save_images:
                 label = labels[0].cpu().long().numpy()
@@ -217,7 +225,7 @@ def main(argv):
                 cv2.imwrite(f'images/{FLAGS.exp}/{epoch}_mask.png', mask_disp)
 
 
-            log_dict = {"Epoch": epoch, "Val Hungarian mIOU": val_miou/val_iter, "Val Pixel Acc": val_pix_acc/val_iter}
+            log_dict = {"Epoch": epoch, "Val Hungarian mIOU": ious.mean(), "Val Pixel Acc": acc}
             print(log_dict)
 
             wandb.log(log_dict)
@@ -243,6 +251,10 @@ def main(argv):
 
                 proj_feat_s = normalize_feature_maps(unnorm_feat_s)
                 proj_feat_t = normalize_feature_maps(unnorm_feat_t)
+
+                if FLAGS.min_mask_area > 0:
+                    tiny_masks = (F.one_hot(proj_feat_t.argmax(dim=1), FLAGS.output_dim).sum(dim=(1,2),keepdim=True).movedim(3,1) < FLAGS.min_mask_area).float() # bs,output_dim,1,1
+                    proj_feat_t = proj_feat_t - 10*tiny_masks
 
                 proj_feats_s.append(proj_feat_s) # bs,no,h,w
                 proj_feats_t.append(proj_feat_t) # bs,no,h,w
@@ -273,7 +285,7 @@ def main(argv):
 
                         preds = F.softmax(feat_crop_s[:,-FLAGS.outp_dim2:]/FLAGS.student_temp, dim=1)
                         present_cats = target.mean(dim=(2,3)) > 0.001 # bs, c
-                        dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
+                        dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
                         dice_loss += (1 - dice_term[present_cats].mean()) / FLAGS.dice_factor
 
                         feat_crop_s = feat_crop_s[:,:-FLAGS.outp_dim2]
@@ -282,7 +294,8 @@ def main(argv):
                     target = F.softmax(feat_crop_t/FLAGS.teacher_temp, dim=1).detach()
 
                     preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
-                    present_cats = target.mean(dim=(2,3)) > (2 / (target.shape[2]*target.shape[3])) # bs, c
+                    if FLAGS.min_mask_area == 0:
+                        present_cats = target.mean(dim=(2,3)) > (3 / (target.shape[2]*target.shape[3])) # bs, c
                     if FLAGS.instance_seg:
                         numerator = (preds.unsqueeze(2) * target.unsqueeze(1)).sum(dim=(-1,-2)) # bs, num_targets, num_preds
                         denominator = (preds.unsqueeze(2)**2 + target.unsqueeze(1)**2).sum(dim=(-1,-2)) # bs, num_targets, num_preds
@@ -293,7 +306,10 @@ def main(argv):
                         contrastive_loss += F.cross_entropy(student_matches/FLAGS.student_temp, target, reduction='mean')
                     else:
                         contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
-                        dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
+                        if FLAGS.sq_dice:
+                            dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
+                        else:
+                            dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
                     
                     #crop_scores = scores_t[t][present_cats].detach()
                     #dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
@@ -305,7 +321,7 @@ def main(argv):
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
-            loss = dice_loss + FLAGS.cont_coeff * contrastive_loss
+            loss = 4*dice_loss + FLAGS.cont_coeff * contrastive_loss
 
             loss.backward()
             optimizer.step()
@@ -337,7 +353,7 @@ def main(argv):
                 label[label < 0] = FLAGS.num_output_classes
                 #cluster_preds = F.upsample(cluster_preds[:FLAGS.miou_bs], scale_factor=4)
                 #dino_preds = F.upsample(dino_preds[:FLAGS.miou_bs], scale_factor=14)
-                proj_feat_up = F.upsample(proj_feats_s[0][:FLAGS.miou_bs], scale_factor=8)
+                proj_feat_up = F.upsample(proj_feats_s[0][:FLAGS.miou_bs], scale_factor=4)
 
                 #pred_cluster_acc = (cluster_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()
                 #dino_acc = (dino_preds.argmax(dim=1)[label >= 0] == label.long()[label >= 0]).to(torch.float32).mean()

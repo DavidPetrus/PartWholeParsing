@@ -135,6 +135,7 @@ class ImageParser(nn.Module):
         elif FLAGS.seg_layers == 'attn':
             out_features = self.attn_layers(feats_s8)
             out_features = out_features[:,1:].reshape(bs, v1_fm_size, v1_fm_size, FLAGS.embd_dim).movedim(3,1) # bs,c,h,w
+            out_features = F.upsample(out_features, scale_factor=2)
         
         masks = self.proj_layer(F.normalize(self.proj_mlp(out_features), dim=1)) # bs,c,h,w
         if student and FLAGS.fm_noise > 0.:
@@ -203,7 +204,7 @@ class ImageParser(nn.Module):
                     round((overlap_dims[0] - s_dims[0]) * fm_scale_s): \
                     round((overlap_dims[2] - s_dims[0]) * fm_scale_s)] # B,c,fm_b_h,fm_b_w
         
-        fm_s_crop = F.interpolate(fm_s_crop, size=(fm_l_crop.shape[2], fm_l_crop.shape[3]), mode='nearest')
+        fm_s_crop = F.interpolate(fm_s_crop, size=(fm_l_crop.shape[2], fm_l_crop.shape[3]), mode='bilinear')
 
         if crop_dims[1][2] > crop_dims[0][2]:
             return fm_s_crop, fm_l_crop

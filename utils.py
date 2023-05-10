@@ -19,34 +19,6 @@ FLAGS = flags.FLAGS
 color = np.random.randint(0,256,[256,3],dtype=np.uint8)
 
 
-def calc_mIOU(preds, targets):
-    # preds : bs, nc, h, w
-    # targets: bs, nc, h, w
-
-    #assert preds.shape == torch.size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//8, FLAGS.image_size//8])
-    #assert targets.shape == torch.Size([FLAGS.batch_size, FLAGS.num_output_classes, FLAGS.image_size//FLAGS.output_stride, FLAGS.image_size//FLAGS.output_stride])
-
-    intersection = torch.logical_and(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
-    union = torch.logical_or(preds.unsqueeze(2), targets.unsqueeze(1)).sum(dim=(-1,-2))
-    iou = intersection / (union + 0.001) # bs, num_preds, num_output_classes
-
-    present_cats = targets.sum(dim=(2,3)) > 0 # bs, num_output_classes
-
-    # Compute maximum IOU per prediction
-    iou_per_prediction, max_idxs = iou.max(dim=2, keepdim=True) # bs, num_preds, 1 (num_output_classes indices)
-    
-    # One_hot each prediction with corresponding (max iou) label
-    max_idxs = F.one_hot(max_idxs.squeeze(), FLAGS.num_output_classes)
-    
-    # Compute total IOU per label (by summing corresponding predictions)
-    iou_product = iou_per_prediction * max_idxs # bs, num_preds, num_output_classes
-    iou_sum_per_label = iou_product.sum(dim=1) # bs, num_output_classes
-
-    # Calculate mIOU for present categories
-    mIOU = (iou_sum_per_label * present_cats.float()).sum(dim=1) / present_cats.float().sum(dim=1) # bs
-
-    return mIOU.mean()
-
 def calc_hungarian_mIOU(preds, targets):
     # preds : bs, nc, h, w
     # targets: bs, nc, h, w
@@ -73,6 +45,32 @@ def calc_hungarian_mIOU(preds, targets):
         mean_pixel_accs.append((preds[b_ix][col_ind[present_cats[b_ix]]].argmax(dim=0) == targets[b_ix][row_ind[present_cats[b_ix]]].argmax(dim=0)).float().mean())
 
     return sum(mean_IOUs) / len(mean_IOUs), sum(mean_pixel_accs) / len(mean_pixel_accs)
+
+
+def get_stats(preds, targets):
+    # preds : bs, h, w
+    # targets: bs, h, w
+
+    preds = preds.reshape(-1)
+    targets = targets.reshape(-1)
+    mask = targets >= 0
+    preds = preds[mask]
+    targets = targets[mask]
+
+    return torch.bincount(targets * FLAGS.output_dim + preds, minlength=FLAGS.output_dim*FLAGS.num_output_classes).reshape(FLAGS.num_output_classes, FLAGS.output_dim)
+
+def calc_mIOU(stats):
+    row_ind,col_ind = linear_sum_assignment(stats.detach().cpu(), maximize=True) # num_output_classes
+    assigned_cats = stats[:,col_ind] # nc, nc
+    tp = torch.diag(assigned_cats)
+    fp = torch.sum(assigned_cats, dim=0) - tp
+    fn = torch.sum(stats, dim=1) - tp
+
+    iou = tp / (tp + fp + fn)
+    acc = tp.sum() / stats.sum()
+
+    return iou, acc
+
 
 def assignMaxIOU(preds, targets):
     with torch.no_grad():
