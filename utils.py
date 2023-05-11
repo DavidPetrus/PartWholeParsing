@@ -105,7 +105,9 @@ def transform_image(img):
     return img
 
 def normalize_feature_maps(fm):
-    if FLAGS.norm_type == 'mean_max':
+    if FLAGS.norm_type == 'max':
+        return fm - fm.flatten(2).max(dim=2, keepdim=True)[0].max(dim=0, keepdim=True)[0].unsqueeze(-1)
+    elif FLAGS.norm_type == 'mean_max':
         return fm - (1 - FLAGS.mean_max_coeff) * fm.mean(dim=(2,3), keepdim=True) - FLAGS.mean_max_coeff * fm.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
     elif FLAGS.norm_type == 'mean_std':
         return fm - fm.mean(dim=(2,3), keepdim=True) - fm.std(dim=(2,3), keepdim=True)

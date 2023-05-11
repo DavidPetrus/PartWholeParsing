@@ -95,16 +95,6 @@ class ImageParser(nn.Module):
 
         if FLAGS.linear_score:
             self.score_proj = nn.Conv2d(FLAGS.output_dim, FLAGS.output_dim, kernel_size=1).to('cuda')
-
-        if FLAGS.instance_seg:
-            if FLAGS.semantic_head == 'attn':
-                self.sem_proj = nn.Linear(FLAGS.embd_dim, FLAGS.sem_width).to('cuda')
-            
-            self.sem_mlp = nn.Sequential(nn.Linear(FLAGS.sem_width, FLAGS.sem_width), nn.GELU(), nn.Linear(FLAGS.sem_width, FLAGS.sem_width//2), nn.GELU(), \
-                                         nn.Linear(FLAGS.sem_width//2, FLAGS.embd_dim), nn.GELU()).to('cuda')
-            self.sem_final = torch.nn.utils.weight_norm(nn.Linear(FLAGS.embd_dim, FLAGS.output_dim+FLAGS.outp_dim2)).to('cuda')
-            self.sem_final.weight_g.data.fill_(1)
-            self.sem_final.weight_g.requires_grad = False
     
 
     def forward(self, x, val=False, student=False):
