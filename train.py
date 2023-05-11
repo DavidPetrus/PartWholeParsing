@@ -159,6 +159,8 @@ def main(argv):
 
     out_stride = 4
 
+    arange = torch.arange(FLAGS.batch_size).to('cuda')
+
     train_iter = 0
     torch.autograd.set_detect_anomaly(True)
     for epoch in range(FLAGS.num_epochs):
@@ -176,10 +178,10 @@ def main(argv):
                 labels = labels.to('cuda')
 
                 if FLAGS.student_eval:
-                    proj_feat = student(images, val=True)
+                    proj_feat,_ = student(images, val=True)
                     #_, cluster_preds = student.cluster_lookup(seg_feat)
                 else:
-                    proj_feat = teacher(images, val=True)
+                    proj_feat,_ = teacher(images, val=True)
                     #_, cluster_preds = teacher.cluster_lookup(seg_feat)
 
                 #proj_feat = normalize_feature_maps(proj_feat)
@@ -251,15 +253,16 @@ def main(argv):
             scores_t = []
             min_crop_ix = 0
             for c in range(FLAGS.num_crops):
-                unnorm_feat_s = student(student_crops[c], student=True)
-                unnorm_feat_t = teacher(student_crops[c])
+                unnorm_feat_s,_ = student(student_crops[c], student=True)
+                unnorm_feat_t,dino_feat = teacher(student_crops[c])
 
                 if FLAGS.norm_student:
                     proj_feat_s = normalize_feature_maps(unnorm_feat_s)
                 else:
                     proj_feat_s = unnorm_feat_s
                 
-                proj_feat_t = normalize_feature_maps(unnorm_feat_t).detach()
+                #proj_feat_t = normalize_feature_maps(unnorm_feat_t).detach()
+                proj_feat_t = unnorm_feat_t
 
                 if FLAGS.min_mask_area > 0:
                     tiny_masks = F.one_hot(proj_feat_t.argmax(dim=1), FLAGS.output_dim).sum(dim=(1,2),keepdim=True).movedim(3,1) < FLAGS.min_mask_area # bs,output_dim,1,1
@@ -268,7 +271,7 @@ def main(argv):
                 proj_feats_s.append(proj_feat_s) # bs,no,h,w
                 proj_feats_t.append(proj_feat_t) # bs,no,h,w
                 #seg_feats.append(seg_feat) # bs,c,h,w
-                #dino_feats.append(dino_feat) # bs,c,h,w
+                dino_feats.append(dino_feat) # bs,c,h,w
 
                 #entropy_reg += -torch.log(F.softmax(proj_feat_s/FLAGS.entropy_temp, dim=-1).mean(dim=(2,3))).mean()
 
@@ -279,6 +282,28 @@ def main(argv):
 
                 if crop_dims[c][2] < crop_dims[min_crop_ix][2]:
                     min_crop_ix = c
+
+            if FLAGS.dino_sim > 0:
+                for c in range(FLAGS.num_crops):
+                    # Normalize DINO embeddings
+                    dino_f = F.normalize(dino_feats[c][:,1:].reshape(FLAGS.batch_size*28*28, 384), dim=1)
+                    # Compute cosine similarities
+                    sims = dino_f @ dino_f.t()
+                    # Set all embeddings sims that are from the same image to -1
+                    sims = sims.reshape(FLAGS.batch_size, 28*28, FLAGS.batch_size, 28*28)
+                    sims[arange,:,arange,:] = -1
+                    # Find the nearest neighbour for each embedding
+                    max_sims, max_idxs = sims.reshape(FLAGS.batch_size*28*28, FLAGS.batch_size*28*28).max(dim=1)
+                    # Map the NN embedding indices to match proj_feats_t's size
+                    row_idxs = max_idxs // 28
+                    col_idxs = max_idxs % 28
+                    full_max_idxs = (row_idxs * 2 * 56 + col_idxs * 2).reshape(FLAGS.batch_size,28,28).repeat_interleave(2,dim=1).repeat_interleave(2,dim=2).reshape(-1) # bs*56*56
+                    # Add the output logits of the DINO nearest neighbour embedding to each embedding
+                    feat_t = proj_feats_t[c].movedim(1,3).reshape(FLAGS.batch_size*56*56, FLAGS.output_dim)
+                    feat_t = feat_t + feat_t[full_max_idxs]
+
+                    proj_feats_t[c] = feat_t.reshape(FLAGS.batch_size, 56, 56, FLAGS.output_dim).movedim(3,1)
+
 
             out_size = int((FLAGS.image_size/out_stride) / crop_dims[min_crop_ix][2])
             target_crops = []
@@ -302,6 +327,7 @@ def main(argv):
                 full_target = (target_crops * padded_mask).sum(dim=0) / (padded_mask.sum(dim=0) + 0.0001)
             elif FLAGS.combine_crops == 'before_sm':
                 full_target = (target_crops * padded_mask).sum(dim=0)
+                full_target = normalize_feature_maps(full_target)
                 full_target = F.softmax(full_target/FLAGS.teacher_temp, dim=1)
 
             contrastive_loss = 0.

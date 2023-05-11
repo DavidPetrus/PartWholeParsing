@@ -132,7 +132,7 @@ class ImageParser(nn.Module):
             fm_noise = torch.randn(*masks.shape, device='cuda') * FLAGS.fm_noise
             masks = masks + fm_noise
 
-        return masks
+        return masks, feats_s8
 
     def forward_seg_head(self, dino_feat, masks):
         # masks bs,no,h,w
