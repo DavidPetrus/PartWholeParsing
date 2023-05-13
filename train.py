@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import torch
 import torch.nn.functional as F
+import torchvision
 import random
 torch.manual_seed(66)
 np.random.seed(66)
@@ -29,6 +30,7 @@ flags.DEFINE_string('dataset','cityscapes','ADE_Partial, ADE_Full, coco')
 flags.DEFINE_integer('num_epochs', 60, '')
 flags.DEFINE_bool('save_images',True,'')
 flags.DEFINE_string('backbone','dinov1','dinov1, dinov2')
+flags.DEFINE_bool('weighted_ce', True, '')
 flags.DEFINE_float('dino_sim',0.35,'')
 flags.DEFINE_string('seg_layers','attn','attn or conv')
 flags.DEFINE_bool('square_dice', True, '')
@@ -45,6 +47,7 @@ flags.DEFINE_integer('eval_size',336,'')
 flags.DEFINE_integer('num_crops',4,'')
 flags.DEFINE_float('min_crop',0.55,'Height/width size of crop')
 flags.DEFINE_float('teacher_momentum', 0.99, '')
+flags.DEFINE_float('dice_coeff',0.,'')
 flags.DEFINE_float('cont_coeff',1.,'')
 flags.DEFINE_float('score_coeff',3.,'')
 flags.DEFINE_float('entropy_reg', 0., '')
@@ -215,7 +218,8 @@ def main(argv):
                 if val_iter > 3 and epoch==0:
                     break
 
-            ious, acc = calc_mIOU(stats)
+            ious, acc, cat_freq = calc_mIOU(stats)
+            print(cat_freq)
             print(ious)
 
             if FLAGS.save_images:
@@ -300,17 +304,20 @@ def main(argv):
                     full_max_idxs = (row_idxs * 2 * 56 + col_idxs * 2).reshape(FLAGS.batch_size,28,28).repeat_interleave(2,dim=1).repeat_interleave(2,dim=2).reshape(-1) # bs*56*56
                     # Add the output logits of the DINO nearest neighbour embedding to each embedding
                     feat_t = proj_feats_t[c].movedim(1,3).reshape(FLAGS.batch_size*56*56, FLAGS.output_dim)
-                    feat_t = feat_t + feat_t[full_max_idxs]
+                    feat_t = (feat_t + feat_t[full_max_idxs]) / 2
 
                     proj_feats_t[c] = feat_t.reshape(FLAGS.batch_size, 56, 56, FLAGS.output_dim).movedim(3,1)
-
 
             out_size = int((FLAGS.image_size/out_stride) / crop_dims[min_crop_ix][2])
             target_crops = []
             for c in range(FLAGS.num_crops):
                 bs,ch,s,_ = proj_feats_t[c].shape
                 targ = F.interpolate(proj_feats_t[c], scale_factor=crop_dims[c][2]/crop_dims[min_crop_ix][2], mode='bilinear')
+                if crop_dims[c][3] == True:
+                    targ = torchvision.transforms.functional.hflip(targ)
+
                 if FLAGS.combine_crops == 'after_sm':
+                    targ = normalize_feature_maps(targ)
                     targ = F.softmax(targ/FLAGS.teacher_temp, dim=1)
 
                 delta_x = out_size - (int(crop_dims[c][0]*out_size) + int(out_size - (crop_dims[c][0]+crop_dims[c][2])*out_size) + targ.shape[3])
@@ -323,12 +330,11 @@ def main(argv):
 
             target_crops = torch.stack(target_crops) # num_crops, bs, nc, out_size, out_size
             padded_mask = (target_crops > -10.).float()
-            if FLAGS.combine_crops == 'after_sm':
-                full_target = (target_crops * padded_mask).sum(dim=0) / (padded_mask.sum(dim=0) + 0.0001)
-            elif FLAGS.combine_crops == 'before_sm':
-                full_target = (target_crops * padded_mask).sum(dim=0)
+            full_target = (target_crops * padded_mask).sum(dim=0) / (padded_mask.sum(dim=0) + 0.0001)
+            if FLAGS.combine_crops == 'before_sm':
                 full_target = normalize_feature_maps(full_target)
                 full_target = F.softmax(full_target/FLAGS.teacher_temp, dim=1)
+
 
             contrastive_loss = 0.
             dice_loss = 0.
@@ -347,34 +353,37 @@ def main(argv):
                     feat_crop_s = feat_crop_s[:,:-FLAGS.outp_dim2]
                     feat_crop_t = feat_crop_t[:,:-FLAGS.outp_dim2]
 
-                target = feat_crop_t = full_target[:,:,int(crop_dims[s][1]*out_size):int((crop_dims[s][1]+crop_dims[s][2])*out_size), \
+                target = full_target[:,:,int(crop_dims[s][1]*out_size):int((crop_dims[s][1]+crop_dims[s][2])*out_size), \
                                                        int(crop_dims[s][0]*out_size):int((crop_dims[s][0]+crop_dims[s][2])*out_size)]
 
-                feat_crop_s = F.interpolate(proj_feats_s[s], size=(target.shape[2],target.shape[3]), mode='bilinear')
-                preds = F.softmax(feat_crop_s/FLAGS.student_temp, dim=1)
+                target = F.interpolate(target, size=(proj_feats_s[s].shape[2], proj_feats_s[s].shape[3]), mode='bilinear')
 
-                if FLAGS.min_mask_area == 0:
-                    present_cats = target.mean(dim=(2,3)) > (3 / (target.shape[2]*target.shape[3])) # bs, c
+                if FLAGS.weighted_ce:
+                    class_weighting = 1 / torch.log(F.one_hot(target.argmax(dim=1), FLAGS.output_dim).sum(dim=(0,1,2)) + 2)
+                    contrastive_loss += F.cross_entropy(proj_feats_s[s]/FLAGS.student_temp, target, weight=class_weighting)
                 else:
-                    present_cats = tiny_masks.squeeze()
+                    contrastive_loss += F.cross_entropy(proj_feats_s[s]/FLAGS.student_temp, target)
 
-                contrastive_loss += F.cross_entropy(feat_crop_s/FLAGS.student_temp, target, reduction='mean')
-                if FLAGS.square_dice:
-                    dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
-                else:
-                    dice_term = 2*(preds*target).sum(dim=(2,3))/((preds).sum(dim=(2,3)) + (target).sum(dim=(2,3)) + 0.0001) # bs,c
-                
-                #crop_scores = scores_t[t][present_cats].detach()
-                #dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
-                dice_loss += 1 - dice_term[present_cats].mean()
+                if FLAGS.dice_coeff > 0.:
+                    if FLAGS.square_dice:
+                        dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
+                    else:
+                        dice_term = 2*(preds*target).sum(dim=(2,3))/(preds.sum(dim=(2,3)) + target.sum(dim=(2,3)) + 0.0001) # bs,c
                     
+                    #crop_scores = scores_t[t][present_cats].detach()
+                    #dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
+                    dice_loss += 1 - dice_term[present_cats].mean()
+                else:
+                    dice_loss = 0.
+                
                 #score_loss += F.mse_loss(scores_s[s][present_cats], dice_term[present_cats].detach())
+
 
 
             #dino_loss, dino_preds = student.cluster_lookup(dino_feats[0].detach(), dino_cluster=True) # _, bs, num_classes, h, w
             #cluster_loss, cluster_preds = student.cluster_lookup(seg_feats[0].detach()) # _, bs, num_classes, h, w
 
-            loss = 4*dice_loss + FLAGS.cont_coeff * contrastive_loss
+            loss = FLAGS.dice_coeff*dice_loss + FLAGS.cont_coeff * contrastive_loss
 
             loss.backward()
             optimizer.step()
@@ -389,8 +398,8 @@ def main(argv):
                     param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
 
                 # Compute mIOU between student and teacher predictions
-                feat_s_argmax = feat_crop_s.argmax(dim=1)
-                feat_t_argmax = feat_crop_t.argmax(dim=1)
+                feat_s_argmax = proj_feats_s[s].argmax(dim=1)
+                feat_t_argmax = target.argmax(dim=1)
                 acc_clust = (feat_s_argmax == feat_t_argmax).float().mean()
 
                 intersection = torch.logical_and(F.one_hot(feat_s_argmax, FLAGS.output_dim), F.one_hot(feat_t_argmax, FLAGS.output_dim)).sum(dim=(1,2))
@@ -428,10 +437,14 @@ def main(argv):
                 _, output_counts_img = torch.unique(max_feat_img, return_counts = True)
                 most_freq_frac_img = output_counts_img.max() / output_counts_img.sum()
 
-            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss.item(), \
+                prototypes = student.proj_layer.weight_v.data.squeeze()
+                proto_sims = prototypes @ prototypes.t() # output_dim, output_dim
+                proto_sims = proto_sims.triu(diagonal=1)
+
+            log_dict = {"Epoch": epoch, "Iter": train_iter, "Total Loss": loss.item(), "Cluster Acc": acc_clust.item(), "Dice Loss": dice_loss, \
                         "Contrastive_mIOU": cluster_mIOU.item(), "Hungarian_mIOU": hungarian_mIOU.item(), "Pixel_Acc": pixel_acc.item(), \
                         "Contrastive Loss": contrastive_loss.item(), "Num Categories": output_counts.shape[0], "Num Categories Image": output_counts_img.shape[0], \
-                        "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item()}
+                        "Most Freq Cat": most_freq_frac.item(), "Most Freq Cat Image": most_freq_frac_img.item(), "Max Proto Sim": proto_sims.max(), "Mean Proto Sims": proto_sims.mean()}
             
             if train_iter % 10 == 0:
                 print(log_dict)

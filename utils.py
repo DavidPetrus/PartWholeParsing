@@ -66,10 +66,10 @@ def calc_mIOU(stats):
     fp = torch.sum(assigned_cats, dim=0) - tp
     fn = torch.sum(stats, dim=1) - tp
 
-    iou = tp / (tp + fp + fn)
+    iou = tp / (tp + fp + fn + 0.0001)
     acc = tp.sum() / stats.sum()
 
-    return iou, acc
+    return iou, acc, torch.sum(stats, dim=1)
 
 
 def assignMaxIOU(preds, targets):
