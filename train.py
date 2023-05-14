@@ -310,7 +310,7 @@ def main(argv):
 
             out_size = int((FLAGS.image_size/out_stride) / crop_dims[min_crop_ix][2])
             target_crops = []
-            for c in range(FLAGS.num_crops):
+            for c in range(1):
                 bs,ch,s,_ = proj_feats_t[c].shape
                 targ = F.interpolate(proj_feats_t[c], scale_factor=crop_dims[c][2]/crop_dims[min_crop_ix][2], mode='bilinear')
                 if crop_dims[c][3] == True:
@@ -365,6 +365,7 @@ def main(argv):
                     contrastive_loss += F.cross_entropy(proj_feats_s[s]/FLAGS.student_temp, target)
 
                 if FLAGS.dice_coeff > 0.:
+                    preds = F.softmax(proj_feats_s[s]/FLAGS.student_temp, dim=1)
                     if FLAGS.square_dice:
                         dice_term = 2*(preds*target).sum(dim=(2,3))/((preds**2).sum(dim=(2,3)) + (target**2).sum(dim=(2,3)) + 0.0001) # bs,c
                     else:
@@ -372,7 +373,7 @@ def main(argv):
                     
                     #crop_scores = scores_t[t][present_cats].detach()
                     #dice_loss += 1 - (dice_term[present_cats] * crop_scores).sum() / crop_scores.sum()
-                    dice_loss += 1 - dice_term[present_cats].mean()
+                    dice_loss += 1 - dice_term.mean()
                 else:
                     dice_loss = 0.
                 
